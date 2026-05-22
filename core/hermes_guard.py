@@ -16,7 +16,7 @@ Hermes Guard — Unified Self-Evolution Engine
 
 這是 Agent 在執行任何 systemd/docker/pip/port/litellm 操作前「必須」呼叫的工具。
 """
-import json, os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time, platform
 from pathlib import Path
 from datetime import datetime
 
@@ -116,8 +116,7 @@ def _probe_port_in_use(target: str) -> bool:
 
 def _probe_systemctl_active(target: str) -> bool:
     """systemctl — 僅 Linux systemd 支援，其他平台一律回傳 False"""
-    import platform as _platform
-    if _platform.system() != "Linux":
+    if platform.system() != "Linux":
         return False
     try:
         return subprocess.run(["systemctl", "--user", "is-active", target], capture_output=True, timeout=5).returncode == 0
@@ -133,6 +132,24 @@ ALLOWED_PROBES = {
     "pip_version":       _check_pip_version,
     "env_var_set":       lambda target: os.environ.get(target, "") != "",
     "file_contains":     lambda target: _probe_file_contains(target),
+}
+
+# ═══════════════════════════════════════════
+# 🦅 v1.1.0: SYSTEM_PROBES — 跨平台系統健康探針
+# 獨立於安全層 ALLOWED_PROBES，專注 OS 觀測 (CPU/RAM/Disk/OS)
+# psutil 原生調用，零 subprocess 開銷，Linux/macOS/Windows 通用
+# ═══════════════════════════════════════════
+SYSTEM_PROBES = {
+    "cpu":      lambda: {"percent": psutil.cpu_percent(interval=0.1), "count": os.cpu_count()},
+    "memory":   lambda: {
+        "ram": dict(total=psutil.virtual_memory().total, available=psutil.virtual_memory().available,
+                     used=psutil.virtual_memory().used, percent=psutil.virtual_memory().percent),
+        "swap": dict(total=psutil.swap_memory().total, used=psutil.swap_memory().used,
+                     percent=psutil.swap_memory().percent) if psutil.swap_memory().total > 0 else None,
+    },
+    "disk":     lambda: psutil.disk_usage('/')._asdict(),
+    "os":       lambda: {"system": platform.system(), "release": platform.release(), "cpu_count": os.cpu_count()},
+    "load":     lambda: dict(zip(["1min","5min","15min"], os.getloadavg())) if hasattr(os, "getloadavg") else {"error": "unavailable"},
 }
 
 def _probe_file_contains(target: str) -> bool:
@@ -672,44 +689,53 @@ def revoke_pitfall(pitfall_id: str):
 
 def inspect_system_state(category: str = "all") -> str:
     """
-    系統狀態觀測器。獲取 CPU/RAM/VRAM/Disk 即時狀態。
-    原生 Linux 實作（無外部依賴），在執行高負載操作前必須呼叫。
+    🦅 v1.1.0: 系統狀態觀測器 — 改用 SYSTEM_PROBES (psutil) 取代 shell scripts。
+    跨平台 (Linux/macOS/Windows)，保留向後相容的 category 參數與輸出格式。
+    
+    category: "all" | "hardware_info" | "memory" | "storage" | "cpu" | "os" | "load"
     """
-    import platform
-    
     state = {}
-    
-    if category in ["all", "hardware_info"]:
-        state["os"] = f"{platform.system()} {platform.release()}"
-        state["cpu_count"] = os.cpu_count()
+    if category in ["all", "hardware_info", "os"]:
         try:
-            load = os.getloadavg()
-            state["load_avg"] = {"1min": round(load[0], 2), "5min": round(load[1], 2), "15min": round(load[2], 2)}
+            state["os"] = f"{platform.system()} {platform.release()}"
+            state["cpu_count"] = os.cpu_count()
+        except Exception:
+            pass
+    
+    if category in ["all", "hardware_info", "cpu"]:
+        try:
+            cpu = SYSTEM_PROBES["cpu"]()
+            state["cpu"] = cpu
+        except Exception:
+            state["cpu"] = "unavailable"
+    
+    if category in ["all", "hardware_info", "load"]:
+        try:
+            state["load_avg"] = SYSTEM_PROBES["load"]()
         except Exception:
             state["load_avg"] = "unavailable"
     
+    # ── RAM + Swap ──
     if category in ["all", "memory"]:
-        # 🦅 跨平台重構: /proc/meminfo → psutil (Linux/macOS/Windows 通用)
         try:
-            mem = psutil.virtual_memory()
+            mem_data = SYSTEM_PROBES["memory"]()
+            ram = mem_data["ram"]
             state["ram"] = {
-                "total_gb": round(mem.total / 1024**3, 2),
-                "available_gb": round(mem.available / 1024**3, 2),
-                "used_gb": round(mem.used / 1024**3, 2),
-                "usage_pct": mem.percent
+                "total_gb": round(ram["total"] / 1024**3, 2),
+                "available_gb": round(ram["available"] / 1024**3, 2),
+                "used_gb": round(ram["used"] / 1024**3, 2),
+                "usage_pct": ram["percent"]
             }
-            
-            swap = psutil.swap_memory()
-            if swap.total > 0:
+            if mem_data.get("swap"):
                 state["swap"] = {
-                    "total_gb": round(swap.total / 1024**3, 2),
-                    "used_gb": round(swap.used / 1024**3, 2),
-                    "usage_pct": swap.percent
+                    "total_gb": round(mem_data["swap"]["total"] / 1024**3, 2),
+                    "used_gb": round(mem_data["swap"]["used"] / 1024**3, 2),
+                    "usage_pct": mem_data["swap"]["percent"]
                 }
         except Exception:
             state["ram"] = "unavailable"
         
-        # VRAM: NVIDIA GPU
+        # VRAM: NVIDIA GPU (Linux only)
         if platform.system() == "Linux":
             try:
                 res = subprocess.run(
@@ -727,25 +753,19 @@ def inspect_system_state(category: str = "all") -> str:
                     state["gpu_vram"] = "no NVIDIA GPU or driver missing"
             except Exception:
                 state["gpu_vram"] = "nvidia-smi unavailable"
-        
         elif platform.system() == "Darwin":
             state["gpu_vram"] = "Unified Memory (Apple Silicon) — see ram"
     
+    # ── Disk ──
     if category in ["all", "storage"]:
         try:
-            res = subprocess.run(["df", "-B1", "/"], capture_output=True, text=True, timeout=5)
-            lines = res.stdout.strip().split("\n")
-            if len(lines) >= 2:
-                parts = lines[1].split()
-                total = int(parts[1])
-                used = int(parts[2])
-                free = int(parts[3])
-                state["disk"] = {
-                    "total_gb": round(total / 1024**3, 2),
-                    "free_gb": round(free / 1024**3, 2),
-                    "used_gb": round(used / 1024**3, 2),
-                    "usage_pct": round(used / total * 100, 1) if total > 0 else 0
-                }
+            disk = SYSTEM_PROBES["disk"]()
+            state["disk"] = {
+                "total_gb": round(disk["total"] / 1024**3, 2),
+                "free_gb": round(disk["free"] / 1024**3, 2),
+                "used_gb": round(disk["used"] / 1024**3, 2),
+                "usage_pct": round(disk["used"] / disk["total"] * 100, 1) if disk["total"] > 0 else 0
+            }
         except Exception:
             state["disk"] = "unavailable"
     
@@ -1184,6 +1204,20 @@ def main():
         try:
             is_regex = sys.argv[5].lower() != "text" if len(sys.argv) > 5 else True
             result = patch_file_content(sys.argv[2], sys.argv[3], sys.argv[4], is_regex)
+            print(result)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+    
+    elif cmd == "probe":
+        target = sys.argv[2] if len(sys.argv) > 2 else "all"
+        try:
+            if target == "all":
+                result = inspect_system_state("all")
+            elif target in SYSTEM_PROBES:
+                result = json.dumps(SYSTEM_PROBES[target](), indent=2, ensure_ascii=False)
+            else:
+                result = json.dumps({"error": f"Unknown probe: {target}", "available": list(SYSTEM_PROBES.keys())})
             print(result)
         except Exception as e:
             print(f"ERROR: {e}", file=sys.stderr)
