@@ -18,4 +18,16 @@ EXIT_CODE=${PIPESTATUS[0]}
 
 # 寫入摘要行
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] exit_code=$EXIT_CODE" >> "$LOG_FILE"
+
+# ------------------------------------------------------------------------------
+# [自體代謝機制] Log Rotation
+# 防止系統長期運作導致 logs/ 空間膨脹
+# ------------------------------------------------------------------------------
+if [ -d "$LOG_DIR" ]; then
+    echo "[Log Rotation] 啟動日誌代謝，正在清理 7 天前的歷史日誌..." | tee -a "$LOG_FILE"
+    # 使用 -delete 是最安全且 O(1) 的原生清理做法
+    find "$LOG_DIR" -name "*.log" -type f -mtime +7 -delete 2>/dev/null
+    echo "[Log Rotation] 清理完成。" | tee -a "$LOG_FILE"
+fi
+
 exit $EXIT_CODE
