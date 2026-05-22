@@ -4,45 +4,50 @@ Hermes MCP Guard Server
 Author: aguo17
 License: MIT
 Description: A Zero-Latency, Self-Healing System Guard Server for AI Agents
-             using Anthropic's Model Context Protocol (MCP).
+using Anthropic's Model Context Protocol (MCP).
 """
 
 import os
 import sys
 import json
-import shlex
+import signal          # FIX #3: 移到頂層 import，避免清理中途失敗
+import threading       # FIX #4: Rate limiter thread-safety
 import subprocess
 import time
+
 from mcp.server.fastmcp import FastMCP
 
 # ═══════════════════════════════════════════════════════
-#  Rate Limiting：防止 Agent 邏輯出錯導致的無限迴圈呼叫
+# Rate Limiting：防止 Agent 邏輯出錯導致的無限迴圈呼叫
 # ═══════════════════════════════════════════════════════
 
 _LAST_CALL = 0.0
-_MIN_INTERVAL = 0.5  # 每 0.5 秒最多執行一次防禦操作
+_MIN_INTERVAL = 0.5   # 每 0.5 秒最多執行一次防禦操作
+_COOLDOWN_LOCK = threading.Lock()  # FIX #4: 加鎖防止 race condition
+
 
 def _check_cooldown() -> None:
     """冷卻檢查：阻擋過於頻繁的呼叫，防止 DoS / Token 浪費"""
     global _LAST_CALL
-    now = time.time()
-    elapsed = now - _LAST_CALL
-    if elapsed < _MIN_INTERVAL:
-        raise RuntimeError(
-            f"⏱️  呼叫過於頻繁（距上次僅 {elapsed:.2f}s）。"
-            f"請等待 {_MIN_INTERVAL - elapsed:.2f}s 後再試。"
-        )
-    _LAST_CALL = now
+    with _COOLDOWN_LOCK:  # FIX #4: thread-safe 讀寫
+        now = time.time()
+        elapsed = now - _LAST_CALL
+        if elapsed < _MIN_INTERVAL:
+            raise RuntimeError(
+                f"⏱️ 呼叫過於頻繁（距上次僅 {elapsed:.2f}s）。"
+                f"請等待 {_MIN_INTERVAL - elapsed:.2f}s 後再試。"
+            )
+        _LAST_CALL = now
 
 
 # ═══════════════════════════════════════════════════════
-#  啟動自檢
+# 啟動自檢
 # ═══════════════════════════════════════════════════════
 
 # 1. Root 權限警告
 if hasattr(os, "geteuid") and os.geteuid() == 0:
     print(
-        "⚠️  警告：不建議以 root 權限執行 Hermes MCP Guard。"
+        "⚠️ 警告：不建議以 root 權限執行 Hermes MCP Guard。"
         "請使用一般用戶身份。",
         file=sys.stderr,
     )
@@ -56,7 +61,6 @@ HERMES_DIR = os.path.expanduser(os.environ.get("HERMES_DIR", "~/.hermes"))
 def run_diagnostic():
     """環境自檢：啟動時驗證必要元件"""
     issues = []
-
     if not os.path.exists(GUARD_SH):
         issues.append(f"hermes_guard.sh 未在 {GUARD_SH} 找到。請執行 setup.sh")
     elif not os.access(GUARD_SH, os.X_OK):
@@ -77,15 +81,22 @@ _startup_issues = run_diagnostic()
 if _startup_issues:
     print("🔍 Hermes MCP Guard — 環境自檢", file=sys.stderr)
     for issue in _startup_issues:
-        print(f"   ⚠️  {issue}", file=sys.stderr)
+        print(f"  ⚠️ {issue}", file=sys.stderr)
     print(
-        "   💡 請執行: bash setup.sh 來完成安裝", file=sys.stderr
+        "  💡 請執行: bash setup.sh 來完成安裝", file=sys.stderr
     )
     print("", file=sys.stderr)
 
+# FIX #7: 將啟動問題存成可在 tool 回應中附帶的警告
+_STARTUP_WARNING = (
+    "\n\n⚠️ [環境警告] 啟動時偵測到問題，部分功能可能失效：\n"
+    + "\n".join(f"  - {i}" for i in _startup_issues)
+    + "\n請執行 bash setup.sh 完成安裝。"
+) if _startup_issues else ""
+
 
 # ═══════════════════════════════════════════════════════
-#  FastMCP Server
+# FastMCP Server
 # ═══════════════════════════════════════════════════════
 
 mcp = FastMCP("Hermes-Guard", dependencies=["mcp"])
@@ -108,7 +119,7 @@ def run_guard_cli(action: str, *args) -> subprocess.CompletedProcess:
 
 
 # ═══════════════════════════════════════════════════════
-#  MCP Tools
+# MCP Tools
 # ═══════════════════════════════════════════════════════
 
 @mcp.tool()
@@ -122,16 +133,25 @@ def execute_command(command: str) -> str:
         command: 要執行的完整終端機指令 (例如: "python3 app.py --port 8000")
     """
     _check_cooldown()
-    parsed_args = shlex.split(command)
-    result = run_guard_cli("wrap", *parsed_args)
+
+    # FIX #1: 不再用 shlex.split 展開，直接把完整字串以 "shell" op_type 傳入，
+    # 避免 hermes_guard.sh wrap 段把第一個 token 誤認成 OP。
+    result = run_guard_cli("wrap", "shell", command)
 
     if result.returncode != 0:
         return (
             f"⛔ [防禦網執行攔截/異常]\n"
             f"============ STDERR ============\n{result.stderr}\n"
             f"============ STDOUT ============\n{result.stdout}"
+            + _STARTUP_WARNING  # FIX #7
         )
-    return f"✅ [執行成功]:\n{result.stdout}"
+
+    # FIX #9: 成功時也附上 stderr（部分工具如 pip/ffmpeg 重要訊息在 stderr）
+    output = f"✅ [執行成功]:\n{result.stdout}"
+    if result.stderr.strip():
+        output += f"\n[stderr]:\n{result.stderr}"
+    output += _STARTUP_WARNING  # FIX #7
+    return output
 
 
 @mcp.tool()
@@ -146,7 +166,7 @@ def kill_resource(target: str) -> str:
     _check_cooldown()
     result = run_guard_cli("kill", target)
     if result.returncode != 0:
-        return f"❌ 資源終止失敗:\n{result.stderr}"
+        return f"❌ 資源終止失敗:\n{result.stderr}" + _STARTUP_WARNING
     return f"🎯 資源清理完畢:\n{result.stdout}"
 
 
@@ -158,10 +178,23 @@ def register_new_antibody(error_pattern: str, description: str, remediation: str
 
     Args:
         error_pattern: 觸發錯誤的關鍵字串特徵 (例如: "externally-managed-environment")
-        description: 此錯誤成因的簡短系統描述
-        remediation: 提供給未來自己或人類的修復引導指引
+        description:   此錯誤成因的簡短系統描述
+        remediation:   提供給未來自己或人類的修復引導指引
     """
     _check_cooldown()
+
+    # FIX #10: 清洗 error_pattern，避免 shell injection
+    # 移除換行、null byte、及危險 shell metachar
+    import re
+    for field_name, field_val in [("error_pattern", error_pattern),
+                                   ("description", description),
+                                   ("remediation", remediation)]:
+        if re.search(r'[\x00\n\r`$\\|;&<>]', field_val):
+            return (
+                f"❌ 輸入欄位 '{field_name}' 包含不允許的特殊字元（換行、shell metachar 等）。"
+                "請移除後重試。"
+            )
+
     result = run_guard_cli("register", error_pattern, description, remediation)
     if result.returncode != 0:
         return f"❌ 轉錄新抗體失敗:\n{result.stderr}"
@@ -177,7 +210,7 @@ def inspect_system_health() -> str:
     _check_cooldown()
     result = run_guard_cli("inspect")
     if result.returncode != 0:
-        return f"❌ 無法獲取系統狀態:\n{result.stderr}"
+        return f"❌ 無法獲取系統狀態:\n{result.stderr}" + _STARTUP_WARNING
     return result.stdout
 
 
@@ -191,20 +224,21 @@ def get_active_defense_rules() -> str:
     result = run_guard_cli("list")
     if result.returncode != 0:
         return f"❌ 無法讀取防禦網:\n{result.stderr}"
-
     try:
         data = json.loads(result.stdout)
         lines = [
-            f"🛡️  防禦網狀態 — {data['total']} 條抗體",
-            f"   auto (自主學習): {data.get('auto', 0)}",
-            f"   manual (手動部署): {data.get('manual', 0)}",
+            f"🛡️ 防禦網狀態 — {data['total']} 條抗體",
+            f"  auto (自主學習): {data.get('auto', 0)}",
+            f"  manual (手動部署): {data.get('manual', 0)}",
             "",
         ]
         for p in data.get("pitfalls", []):
             gc = "🔒" if p.get("guard_check") else "  "
-            lines.append(
-                f"  {gc} {p['id']:25s} [{p['severity']:8s}] {p['description'][:60]}"
-            )
+            # FIX #5: 用 .get() 取代直接 key access，避免 KeyError crash
+            pid   = p.get("id", "unknown")
+            sev   = p.get("severity", "unknown")
+            desc  = p.get("description", "")[:60]
+            lines.append(f"  {gc} {pid:25s} [{sev:8s}] {desc}")
         return "\n".join(lines)
     except json.JSONDecodeError:
         return f"📋 防禦網原始輸出:\n{result.stdout}"
@@ -222,7 +256,7 @@ def cleanup_all() -> str:
     3. 逾時的暫存資源
     """
     _check_cooldown()
-    import signal
+    # FIX #3: signal 已在頂層 import，此處不再重複 import
 
     results = []
 
@@ -248,16 +282,28 @@ def cleanup_all() -> str:
             active = [s for s in services if s.get("status") == "active"]
             for svc in active:
                 pid = svc.get("pid")
+                alias = svc.get("alias", pid)
                 if pid:
                     try:
                         os.kill(pid, signal.SIGTERM)
-                        results.append(f"🛑 已終止服務 {svc.get('alias', pid)} (PID: {pid})")
+                        results.append(f"🛑 已送出 SIGTERM：{alias} (PID: {pid})")
+
+                        # FIX #6: 等待 3 秒，確認是否真的結束，否則補 SIGKILL
+                        time.sleep(3)
+                        try:
+                            os.kill(pid, 0)  # 進程還活著
+                            os.kill(pid, signal.SIGKILL)
+                            results.append(f"💥 SIGTERM 無效，已強制 SIGKILL：{alias} (PID: {pid})")
+                        except ProcessLookupError:
+                            results.append(f"✅ {alias} (PID: {pid}) 已正常結束")
+
                     except ProcessLookupError:
-                        results.append(f"💤 服務 {svc.get('alias', pid)} (PID: {pid}) 已不存在")
+                        results.append(f"💤 服務 {alias} (PID: {pid}) 已不存在")
                     except Exception as e:
-                        results.append(f"⚠️ 無法終止 {svc.get('alias', pid)}: {e}")
+                        results.append(f"⚠️ 無法終止 {alias}: {e}")
+
             if active:
-                results.append(f"📋 共清理 {len(active)} 個註冊服務")
+                results.append(f"📋 共處理 {len(active)} 個註冊服務")
         except Exception as e:
             results.append(f"⚠️ 讀取服務註冊表失敗: {e}")
 
