@@ -23,17 +23,22 @@ from mcp.server.fastmcp import FastMCP
 # ═══════════════════════════════════════════════════════
 
 _MIN_INTERVAL = 0.5   # 每 0.5 秒最多執行一次防禦操作
-_COOLDOWN_FILE = os.path.join(HERMES_HOME, "self_evolution", ".rate_limit")
+
+
+def _get_cooldown_file() -> str:
+    """延遲解析 cooldown 檔案路徑，避免 NameError（HERMES_HOME 定義順序問題）"""
+    hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes")))
+    return os.path.join(hermes_home, "self_evolution", ".rate_limit")
 
 
 def _check_cooldown() -> None:
     """冷卻檢查：阻擋過於頻繁的呼叫，防止 DoS / Token 浪費"""
-    os.makedirs(os.path.dirname(_COOLDOWN_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(_get_cooldown_file()), exist_ok=True)
     now = time.time()
     
     # 讀取上次呼叫時間（檔案鎖）
     try:
-        with open(_COOLDOWN_FILE, "r") as f:
+        with open(_get_cooldown_file(), "r") as f:
             last_call = float(f.read().strip())
     except (FileNotFoundError, ValueError):
         last_call = 0.0
@@ -47,7 +52,7 @@ def _check_cooldown() -> None:
     
     # 寫入本次呼叫時間
     try:
-        with open(_COOLDOWN_FILE, "w") as f:
+        with open(_get_cooldown_file(), "w") as f:
             f.write(str(now))
     except Exception:
         pass  # 寫入失敗不阻擋操作
