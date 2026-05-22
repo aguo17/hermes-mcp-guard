@@ -4,11 +4,16 @@
 source $HOME/.bashrc 2>/dev/null || true
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 
-LOG_DIR="$HOME/.hermes/logs"
+# 🦅 動態路徑：從腳本位置推算專案根目錄，擺脫 ~/.hermes/ 硬編碼
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CORE_DIR="$REPO_ROOT/core"
+
+LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/reflect_cron_$(date +%Y%m%d).log"
 
-cd ~/.hermes/self_evolution && /usr/bin/python3 reflect_worker.py 2>&1 | tee -a "$LOG_FILE"
+cd "$CORE_DIR" && /usr/bin/python3 reflect_worker.py 2>&1 | tee -a "$LOG_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 
 # 寫入摘要行

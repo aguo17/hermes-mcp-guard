@@ -6,7 +6,18 @@
 #
 #  設計原則：零外部依賴，純 /proc + sysfs + dmesg + /sys/class/net
 #  Watchdog 模式：正常 → 靜默，異常 → 輸出警報
+#
+#  ⚠️ 本 Watchdog 依賴 Linux 核心機制 (/proc, sysfs, dmesg, journald)
+#  macOS/BSD 使用者：腳本會自動偵測並安全退出，不會報錯
 # ═══════════════════════════════════════════════════════════════
+
+# 🦅 跨系統防禦：非 Linux 系統安全退出
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "⚠️  此 Watchdog 依賴 Linux 核心機制 (/proc, sysfs, journald)。"
+    echo "   您的系統為 $(uname -s)，將略過核心層檢測。"
+    echo "   macOS 使用者請改用 os_network_health.sh（已適配跨平台）。"
+    exit 0
+fi
 
 ALERT=0
 ALERT_LEVEL=""  # critical / high / medium

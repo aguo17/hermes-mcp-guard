@@ -3,7 +3,14 @@
 # Hermes Phase 2 Watchdog: os_network_health.sh
 # 防禦目標：灰度失效 (Gray Failure) - 認知隔離、物理斷線、慢性窒息
 # 運行哲學：Silent unless alert (0 輸出代表健康)
+#
+# ⚠️ NIC 和 Journald 檢測依賴 Linux 核心機制。macOS 使用者：
+#    腳本會自動略過 Linux 專屬檢測，僅執行跨平台 DNS 解析測試。
 # ==============================================================================
+
+# 🦅 跨系統偵測
+IS_LINUX=false
+[ "$(uname -s)" = "Linux" ] && IS_LINUX=true
 
 ALERTS=""
 
@@ -20,7 +27,7 @@ for iface_path in /sys/class/net/*; do
         continue
     fi
 
-    if [ -f "$iface_path/operstate" ]; then
+    if $IS_LINUX && [ -f "$iface_path/operstate" ]; then
         state=$(cat "$iface_path/operstate")
         if [[ "$state" == "down" ]]; then
             ALERTS+="- 🔴 [NIC] 網卡 $iface 狀態異常 (Link Down)，伺服器可能處於失聯邊緣。\n"
