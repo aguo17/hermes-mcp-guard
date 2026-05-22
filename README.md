@@ -8,6 +8,29 @@ By leveraging the **Model Context Protocol (MCP)**, Hermes seamlessly integrates
 
 ---
 
+## 💻 Platform Compatibility
+
+> **⚠️ Hermes MCP Guard is a Linux-first project. macOS and Windows are NOT fully supported.**
+
+| Layer | 🐧 Linux | 🍎 macOS | 🪟 Windows |
+|-------|:---:|:---:|:---:|
+| **Defense Core** (deny-list, regex interceptor, ReDoS guard, path whitelist) | ✅ | ✅ | ⚠️ Python-only |
+| **System Probes** (`pgrep`, `ss`, `systemctl`, `/proc/meminfo`, `nvidia-smi`) | ✅ | ❌ | ❌ |
+| **Auto-Fix** (`systemctl restart`, `daemon-reload`, `pip pin`) | ✅ | ❌ | ❌ |
+| **Watchdogs** (kernel health, network health, DNS, NIC, journald) | ✅ | ⚠️ Graceful exit | ❌ |
+| **Rate Limiter** (`fcntl.flock`) | ✅ | ✅ | ❌ |
+| **Knowledge Graph** + **Reflection Worker** | ✅ | ✅ | ⚠️ |
+
+### What this means in practice
+
+- **🐧 Linux (Ubuntu/Debian/Fedora/Arch)**: Full functionality. This is the target platform.
+- **🍎 macOS**: The defense layer (dangerous command blocking, error pattern matching) **will work**. However, system probes (`systemctl`, `pgrep`, `ss`) will silently return `False`, and watchdogs will gracefully exit. You get ~40% of the feature set.
+- **🪟 Windows**: **Not supported.** The project relies on bash, `fcntl`, `/proc`, `sysfs`, and Linux-specific system utilities. WSL users should run Hermes inside the Linux VM.
+
+> **We welcome contributions to improve macOS and Windows compatibility.** See [CONTRIBUTING](#-contributing).
+
+---
+
 ## 🚀 Key Features
 
 - **Zero-Latency "Shift-Left" Defense**: Uses static analysis to intercept dangerous commands (e.g., unauthorized `json.loads` calls, dangerous shell injections) at the Bash layer (Layer 1) *before* execution.
