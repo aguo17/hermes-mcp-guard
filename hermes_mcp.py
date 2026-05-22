@@ -55,7 +55,8 @@ if hasattr(os, "geteuid") and os.geteuid() == 0:
 # 2. 動態定位路徑
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GUARD_SH = os.path.join(BASE_DIR, "hermes_guard.sh")
-HERMES_DIR = os.path.expanduser(os.environ.get("HERMES_DIR", "~/.hermes"))
+HERMES_HOME = os.path.expanduser(os.environ.get("HERMES_HOME",
+    os.environ.get("HERMES_DIR", "~/.hermes")))  # BUG-B fix: 統一使用 HERMES_HOME，向後相容 HERMES_DIR
 
 
 def run_diagnostic():
@@ -66,12 +67,12 @@ def run_diagnostic():
     elif not os.access(GUARD_SH, os.X_OK):
         issues.append(f"hermes_guard.sh 無執行權限。請執行 chmod +x {GUARD_SH}")
 
-    if not os.path.exists(HERMES_DIR):
-        issues.append(f"{HERMES_DIR} 目錄不存在。請執行 setup.sh")
+    if not os.path.exists(HERMES_HOME):
+        issues.append(f"{HERMES_HOME} 目錄不存在。請執行 setup.sh")
     else:
-        pitfalls = os.path.join(HERMES_DIR, "pitfalls.json")
+        pitfalls = os.path.join(HERMES_HOME, "self_evolution", "pitfalls.json")
         if not os.path.exists(pitfalls):
-            issues.append(f"pitfalls.json 未在 {HERMES_DIR} 找到。請執行 setup.sh")
+            issues.append(f"pitfalls.json 未在 {HERMES_HOME}/self_evolution/ 找到。請執行 setup.sh")
 
     return issues
 
@@ -274,7 +275,7 @@ def cleanup_all() -> str:
         results.append(f"⚠️ 清理行程時發生問題: {e}")
 
     # 2. 清理孤立的服務註冊表（若有）
-    svc_reg = os.path.join(HERMES_DIR, "self_evolution", "active_services.json")
+    svc_reg = os.path.join(HERMES_HOME, "self_evolution", "active_services.json")
     if os.path.exists(svc_reg):
         try:
             with open(svc_reg) as f:

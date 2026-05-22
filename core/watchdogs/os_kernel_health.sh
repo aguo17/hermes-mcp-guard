@@ -55,7 +55,8 @@ if [ "$ZOMBIE_COUNT" -gt 50 ] 2>/dev/null; then
     ALERT_LEVEL="high"
     REPORT+="🔴 Zombie 程序堆積：${ZOMBIE_COUNT} 個（>50）\n"
     REPORT+="   Zombie 列表：\n"
-    ps aux | awk '{if($8=="Z") printf "  PID=%s PPID=%s CMD=%s\n", $2, $3, $11}' | head -10 >> /dev/stdout
+    ZOMBIE_LIST=$(ps aux 2>/dev/null | awk '{if($8=="Z") printf "  PID=%s PPID=%s CMD=%s\n", $2, $3, $11}' | head -10)
+    REPORT+="$ZOMBIE_LIST\n"
     REPORT+="   建議：檢查 PPID 對應的父程序是否未正確 wait()\n"
 elif [ "$ZOMBIE_COUNT" -gt 20 ] 2>/dev/null; then
     ALERT=1

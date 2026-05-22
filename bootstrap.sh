@@ -25,11 +25,14 @@ echo ""
 # ─── Step 1: 依賴安裝 ─────────────────────────────────────
 echo "📦 Step 1/4: 安裝 Python 依賴..."
 if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+    pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
+    pip3 install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
+    python3 -m pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
     pip install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
     pip3 install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
     python3 -m pip install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || {
         echo "   ⚠️  自動 pip 安裝失敗，請手動執行："
-        echo "   pip install -r $SCRIPT_DIR/requirements.txt"
+        echo "   pip install --break-system-packages -r $SCRIPT_DIR/requirements.txt"
     }
 else
     echo "   ⚠️  找不到 requirements.txt，跳過。"

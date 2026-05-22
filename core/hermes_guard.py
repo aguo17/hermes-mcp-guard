@@ -85,21 +85,21 @@ def linter_check(op_type):
     blocks = []
     
     for pf in pitfalls.get("pitfalls", []):
-        if target_cats is not None and pf["category"] not in target_cats:
+        if target_cats is not None and pf.get("category", "general") not in target_cats:
             continue
         if not pf.get("guard_check"):
             continue
         
-        triggered = run_check(pf["guard_check"])
+        triggered = run_check(pf.get("guard_check", ""))
         if triggered:
             entry = {
-                "id": pf["id"],
-                "severity": pf["severity"],
-                "description": pf["description"],
+                "id": pf.get("id", "unknown"),
+                "severity": pf.get("severity", "medium"),
+                "description": pf.get("description", ""),
                 "auto_fix": pf.get("auto_fix"),
                 "remediation": pf.get("remediation", [])
             }
-            if pf["severity"] == "critical":
+            if pf.get("severity", "medium") == "critical":
                 blocks.append(entry)
             else:
                 warnings.append(entry)
@@ -337,7 +337,8 @@ def register_new_pitfall(error_segment: str, explanation: str, remediation_steps
         return {"status": "rejected", "message": "❌ 註冊失敗：error_segment 太短（需 ≥15 字元），容易造成誤判。請擷取具體的 Stack Trace 片段。"}
     
     # [安全網 1] 泛化檢查
-    if error_segment.strip().lower() in FORBIDDEN_PATTERNS:
+    # BUG-I fix: 子字串比對，而非精確 match（"failed to load" 應被泛化關鍵字 "failed" 攔截）
+    if any(pat in error_segment.lower() for pat in FORBIDDEN_PATTERNS):
         return {"status": "rejected", "message": f"❌ 註冊失敗：'{error_segment}' 太過泛化，會導致全域癱瘓。請提供具體錯誤訊息。"}
     
     import uuid
@@ -607,7 +608,8 @@ def spawn_background_process(command: str, workspace_dir: str, log_file_name: st
     if not os.path.exists(workspace_dir):
         raise FileNotFoundError(f"[Errno 2] 工作目錄不存在: {workspace_dir}")
     
-    args = command.split() if not isinstance(command, list) else command
+    import shlex
+    args = shlex.split(command) if not isinstance(command, list) else command  # BUG-D fix: shlex 保留引號
     log_path = os.path.join(workspace_dir, log_file_name)
     
     kwargs = {}
@@ -883,7 +885,9 @@ def main():
         if len(sys.argv) < 4:
             print(json.dumps({"error": "Usage: hermes_guard wrap <op_type> <command>"}))
             sys.exit(1)
-        result = wrap_command(sys.argv[2], " ".join(sys.argv[3:]))
+        # BUG-A fix: 過濾 -- 分隔符，避免被 join 進 command 字串
+        args = [a for a in sys.argv[3:] if a != "--"]
+        result = wrap_command(sys.argv[2], " ".join(args))
         print(json.dumps(result, indent=2, ensure_ascii=False))
         sys.exit(0 if result["verdict"] in ("OK", "FIXED") else 1)
     
@@ -980,8 +984,10 @@ def main():
     elif cmd == "list":
         pitfalls = load_pitfalls()
         summary = [{
-            "id": p["id"], "severity": p["severity"], "source": p.get("source", "manual"),
-            "description": p["description"], "auto_fix": bool(p.get("auto_fix")), "category": p["category"]
+            "id": p.get("id", "unknown"), "severity": p.get("severity", "medium"),
+            "source": p.get("source", "manual"),
+            "description": p.get("description", ""), "auto_fix": bool(p.get("auto_fix")),
+            "category": p.get("category", "general")
         } for p in pitfalls["pitfalls"]]
         auto_count = len([p for p in pitfalls["pitfalls"] if p.get("source") == "auto"])
         manual_count = len(summary) - auto_count
