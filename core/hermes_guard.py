@@ -64,20 +64,119 @@ def load_pitfalls():
             pass
     return {"pitfalls": []}
 
-def run_check(cmd):
-    """Run a shell guard check. Returns True if triggered (problem found)."""
+# ═══════════════════════════════════════════
+# 🛡️ C-1 fix: 白名單探針系統 — guard_check 不再接受任意 shell
+# 規則庫的 probe_type + probe_target 取代舊的 guard_check 字串
+# 僅允許預定義的安全探針類型，杜絕 pitfalls.json 投毒 → RCE
+# ═══════════════════════════════════════════
+
+def _check_pip_version(target: str) -> bool:
+    """安全檢查 pip 套件版本。target 格式: 'package>=version' 或 'package==version'"""
+    import shlex
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-        return bool(result.stdout.strip())
+        parts = target.split(">=", 1) if ">=" in target else target.split("==", 1) if "==" in target else [target, None]
+        pkg = shlex.quote(parts[0].strip())
+        result = subprocess.run(
+            ["pip", "show", parts[0].strip()],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0 or not parts[1]:
+            return result.returncode != 0  # >=/== 無版本限制時：已安裝即觸發
+        # 版本比對
+        for line in result.stdout.split("\n"):
+            if line.startswith("Version:"):
+                installed = line.split(":")[1].strip()
+                if ">=" in target:
+                    return installed < parts[1].strip()  # 低於目標版本 → 觸發
+                elif "==" in target:
+                    return installed != parts[1].strip()  # 不等於目標 → 觸發
+        return True  # 解析不到版本 → 視為需要修復
     except Exception:
         return False
+
+ALLOWED_PROBES = {
+    "file_exists":       lambda target: os.path.exists(os.path.expanduser(target)),
+    "process_running":   lambda target: subprocess.run(["pgrep", "-x", target], capture_output=True).returncode == 0,
+    "port_in_use":       lambda target: subprocess.run(["ss", "-tlnp"], capture_output=True, text=True).stdout.find(f":{target} ") != -1,
+    "systemctl_active":  lambda target: subprocess.run(["systemctl", "--user", "is-active", target], capture_output=True).returncode == 0,
+    "python_module":     lambda target: subprocess.run([sys.executable or "python3", "-c", f"import {target}"], capture_output=True).returncode == 0,
+    "pip_version":       _check_pip_version,
+    "env_var_set":       lambda target: os.environ.get(target, "") != "",
+    "file_contains":     lambda target: _probe_file_contains(target),
+}
+
+def _probe_file_contains(target: str) -> bool:
+    """target 格式: 'path::pattern' — 檢查檔案是否包含指定字串"""
+    try:
+        parts = target.split("::", 1)
+        if len(parts) != 2:
+            return False
+        fpath, pattern = os.path.expanduser(parts[0]), parts[1]
+        if not os.path.exists(fpath):
+            return False
+        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+            return pattern in f.read()
+    except Exception:
+        return False
+
+def run_probe(pf: dict) -> bool:
+    """
+    🛡️ C-1 fix: 宣告式安全探針 — 取代任意 shell guard_check。
+    僅執行 ALLOWED_PROBES 中白名單定義的操作。
+    若規則仍用舊版 guard_check (任意 shell)，自動忽略並記錄警告。
+    """
+    probe_type = pf.get("probe_type", "").strip()
+    probe_target = pf.get("probe_target", "").strip()
+    
+    if probe_type and probe_type in ALLOWED_PROBES:
+        try:
+            return ALLOWED_PROBES[probe_type](probe_target)
+        except Exception:
+            return False
+    
+    # 向後相容：舊版 guard_check 欄位 → 記錄警告並忽略（不再執行任意 shell）
+    if pf.get("guard_check"):
+        pf_id = pf.get("id", "unknown")
+        print(f"⚠️ [SECURITY] 規則 {pf_id} 使用已棄用的 guard_check (任意 shell)，已自動忽略。"
+              f" 請改用 probe_type + probe_target。", file=sys.stderr)
+    
+    return False
 
 # ═══════════════════════════════════════════
 # LAYER 1: LINTER — Pre-execution check
 # ═══════════════════════════════════════════
 
-def linter_check(op_type):
+# 🛡️ C-2 fix: 硬性 deny-list — 預設阻擋已知危險指令模式
+# 不依賴規則庫，直接在 Layer 1 做正則匹配攔截
+COMMAND_DENYLIST = [
+    (r"rm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\b",             "rm 遞迴強制刪除"),
+    (r">\s*/dev/sd[a-z]",                                       "覆寫區塊裝置"),
+    (r"dd\s+if=",                                               "dd 磁碟操作"),
+    (r"mkfs\.",                                                 "格式化檔案系統"),
+    (r"chmod\s+.*777",                                          "chmod 777 全開權限"),
+    (r"chmod\s+.*-R\s+.*/\s",                                  "chmod -R 遞迴改權限到根目錄"),
+    (r"curl.+\|\s*(ba)?sh\b",                                   "curl 管道到 shell"),
+    (r"wget.+\|\s*(ba)?sh\b",                                   "wget 管道到 shell"),
+    (r":\(\)\s*\{.*:\|:&\s*\};:",                                 "Fork Bomb"),
+    (r"chown\s+-R\s+.*:\s*/\s",                                 "chown -R 遞迴改所有者到根目錄"),
+    (r">\s*/etc/(shadow|passwd|sudoers)",                       "覆寫系統認證檔"),
+]
+
+def check_command_safety(command: str) -> dict:
+    """C-2: 掃描指令是否匹配硬性 deny-list。回傳 {safe: bool, reasons: [...]}"""
+    reasons = []
+    for pattern, desc in COMMAND_DENYLIST:
+        if re.search(pattern, command, re.IGNORECASE):
+            reasons.append(f"🚫 {desc} (匹配: {pattern})")
+    return {"safe": len(reasons) == 0, "reasons": reasons}
+
+def linter_check(op_type, command: str = ""):
     """Check all relevant pitfalls before executing an operation."""
+    # ── Deny-list 預檢 (C-2) ──
+    deny_result = {"safe": True, "reasons": []}
+    if command:
+        deny_result = check_command_safety(command)
+    
     pitfalls = load_pitfalls()
     target_cats = CATEGORY_MAP.get(op_type)
     
@@ -87,10 +186,12 @@ def linter_check(op_type):
     for pf in pitfalls.get("pitfalls", []):
         if target_cats is not None and pf.get("category", "general") not in target_cats:
             continue
-        if not pf.get("guard_check"):
+        # 🛡️ C-1: 同時檢查新版 probe_type 和舊版 guard_check
+        has_guard = bool(pf.get("guard_check")) or (pf.get("probe_type") and pf.get("probe_target"))
+        if not has_guard:
             continue
         
-        triggered = run_check(pf.get("guard_check", ""))
+        triggered = run_probe(pf)
         if triggered:
             entry = {
                 "id": pf.get("id", "unknown"),
@@ -104,18 +205,20 @@ def linter_check(op_type):
             else:
                 warnings.append(entry)
     
-    safe = len(blocks) == 0
+    safe = len(blocks) == 0 and deny_result["safe"]
     result = {
         "layer": "linter",
         "safe": safe,
         "operation": op_type,
         "warnings": warnings,
         "blocks": blocks,
+        "deny_matches": deny_result["reasons"],  # C-2: deny-list 命中結果
         "verdict": "PROCEED" if safe else "BLOCKED"
     }
     
     if not safe:
-        log_event("LINTER_BLOCK", f"op={op_type} blocks={[b['id'] for b in blocks]}")
+        reasons = [b['id'] for b in blocks] + deny_result["reasons"]
+        log_event("LINTER_BLOCK", f"op={op_type} blocks={reasons}")
     
     return result
 
@@ -131,7 +234,7 @@ def interceptor_catch(error_text):
     for pf in pitfalls.get("pitfalls", []):
         for pattern in pf.get("error_patterns", []):
             try:
-                if re.search(pattern, error_text, re.IGNORECASE):
+                if _safe_re_search(pattern, error_text):
                     matches.append({
                         "id": pf.get("id", "unknown"),
                         "description": pf.get("description", ""),
@@ -245,7 +348,7 @@ def wrap_command(op_type, command):
     }
     
     # Stage 1: Linter
-    linter = linter_check(op_type)
+    linter = linter_check(op_type, command)
     result["stages"]["linter"] = linter
     if not linter["safe"]:
         result["executed"] = False
@@ -257,7 +360,7 @@ def wrap_command(op_type, command):
                 result["stages"][f"auto_fix_{block['id']}"] = fix_result
                 if fix_result.get("success"):
                     # Re-check after fix
-                    linter = linter_check(op_type)
+                    linter = linter_check(op_type, command)
                     result["stages"]["linter_retry"] = linter
                     if linter["safe"]:
                         break
@@ -321,7 +424,83 @@ def wrap_command(op_type, command):
 # ═══════════════════════════════════════════
 
 # 禁止註冊的泛化關鍵字（會導致全域誤攔截）
-FORBIDDEN_PATTERNS = ["error", "failed", "exception", "not found", "timeout", "traceback", ".*"]
+# 🛡️ H-2 fix: 擴充泛化關鍵字 — 涵蓋非英文、同義詞、結構性模式
+FORBIDDEN_PATTERNS = [
+    # 英文泛化
+    "error", "failed", "exception", "not found", "timeout", "traceback",
+    "fatal", "crash", "refused", "denied", "invalid", "unknown",
+    "unable", "cannot", "could not", "unavailable", "abort",
+    # 中文泛化
+    "錯誤", "失敗", "異常", "找不到", "逾時", "無法", "拒絕",
+    # 結構性泛化（不含具體資訊的模式）
+    "exit code", "line ", "at ", "occurred", "stack trace",
+]
+
+# 🛡️ H-1 fix: ReDoS 防禦 — 偵測並拒絕 catastrophic backtracking 的 regex 模式
+REDOS_DANGER_PATTERNS = [
+    r"\(.+\)[\+\*]",              # (a+)+ 或 (a+)* 巢狀量詞
+    r"\(.+\)\{1,\}.*[\+\*]",      # (a+){1,}+ 
+    r"\(.+\|.+\|.+\)[\+\*]",      # (a|aa|aaa)+ 指數回溯
+    r"\.\*\.\*",                  # .*.* 雙重貪婪
+    r"\(\.\*\)[\+\*]",            # (.*)+ 自我吞噬
+    r"\(\.\+\)[\+\*]",            # (.+)+ 自我吞噬
+]
+
+def _validate_regex_safety(pattern: str, error_segment: str) -> tuple:
+    """
+    H-1: 檢查 regex 是否包含 catastrophic backtracking 模式。
+    回傳 (safe: bool, reason: str)
+    """
+    # 檢查 1: 巢狀量詞 / 指數回溯模式
+    for danger in REDOS_DANGER_PATTERNS:
+        if re.search(danger, pattern):
+            return False, f"拒絕註冊：regex 包含可能導致 ReDoS 的巢狀量詞模式 (匹配: {danger})"
+
+    # 檢查 2: 長度上限 — 過長的 regex 本身就是攻擊訊號
+    if len(pattern) > 200:
+        return False, f"拒絕註冊：regex 長度 {len(pattern)} 超過上限 200 字元"
+
+    # 檢查 3: 自我測試 — 用 50 字元的 'a' 測試是否逾時
+    import threading, ctypes
+    def _test_re():
+        try:
+            re.search(pattern, "a" * 50 + "X")
+        except:
+            pass
+    
+    thread = threading.Thread(target=_test_re)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout=0.5)
+    if thread.is_alive():
+        # 強制終止執行緒中的 re.search (最後手段)
+        return False, "拒絕註冊：regex 在 0.5 秒內無法完成，疑似 catastrophic backtracking"
+
+    return True, "ok"
+
+def _safe_re_search(pattern: str, text: str, timeout: float = 1.0) -> bool:
+    """
+    H-1: 帶 timeout 的安全 regex 搜尋，防止 interceptor 被惡意 regex 掛死。
+    """
+    result = [False]
+    exception = [None]
+    
+    def _do_search():
+        try:
+            result[0] = bool(re.search(pattern, text, re.IGNORECASE))
+        except Exception as e:
+            exception[0] = e
+    
+    thread = threading.Thread(target=_do_search)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout=timeout)
+    
+    if thread.is_alive():
+        return False  # timeout: 當作未匹配，讓攔截器繼續處理後續規則
+    if exception[0]:
+        return False  # re.error: 當作未匹配
+    return result[0]
 
 def register_new_pitfall(error_segment: str, explanation: str, remediation_steps: str, category: str = "general", severity: str = "medium"):
     """
@@ -336,6 +515,12 @@ def register_new_pitfall(error_segment: str, explanation: str, remediation_steps
     if len(error_segment) < 15:
         return {"status": "rejected", "message": "❌ 註冊失敗：error_segment 太短（需 ≥15 字元），容易造成誤判。請擷取具體的 Stack Trace 片段。"}
     
+    # [安全網 1.5] 🛡️ H-3 fix: Shell metachar 過濾 — 統一在 core 層做輸入清洗
+    SHELL_METACHARS = [';', '&&', '||', '|', '`', '$(', '${']
+    for mc in SHELL_METACHARS:
+        if mc in error_segment:
+            return {"status": "rejected", "message": f"❌ 註冊失敗：error_segment 包含 Shell 特殊字元 '{mc}'，疑似注入攻擊。"}
+    
     # [安全網 1] 泛化檢查
     # BUG-I fix: 子字串比對，而非精確 match（"failed to load" 應被泛化關鍵字 "failed" 攔截）
     if any(pat in error_segment.lower() for pat in FORBIDDEN_PATTERNS):
@@ -348,6 +533,16 @@ def register_new_pitfall(error_segment: str, explanation: str, remediation_steps
     WILDCARD_PLACEHOLDER = "___HERMES_WILDCARD___"
     masked = error_segment.replace(".*", WILDCARD_PLACEHOLDER)
     safe_pattern = re.escape(masked).replace(WILDCARD_PLACEHOLDER, ".*")
+    
+    # [安全網 3] 🛡️ H-1 fix: ReDoS 防禦 — 檢查原始 error_segment (未 escape) 是否有 catastrophic backtracking
+    is_safe, reason = _validate_regex_safety(error_segment, error_segment)
+    if not is_safe:
+        return {"status": "rejected", "message": f"❌ {reason}"}
+    
+    # 對 safe_pattern 也做第二層檢查（含 .* 展開後的完整 regex）
+    is_safe2, reason2 = _validate_regex_safety(safe_pattern, error_segment)
+    if not is_safe2 and is_safe:  # 僅在 raw 通過但 escaped 不通過時才拒絕
+        return {"status": "rejected", "message": f"❌ {reason2}"}
     
     # 讀取現有 prod
     prod_data = {"schema_version": "1.0", "pitfalls": []}
@@ -605,6 +800,20 @@ def spawn_background_process(command: str, workspace_dir: str, log_file_name: st
     非同步啟動常駐背景服務。Fire-and-Forget + 啟動健康檢查。
     Port 衝突、依賴缺失等錯誤會以 RuntimeError 拋出，供 Guard 攔截學習。
     """
+    # 🛡️ H-4 fix: 路徑白名單 — 僅允許在安全目錄下啟動背景服務
+    ALLOWED_WORKDIRS = [
+        os.path.expanduser("~/.hermes"),
+        os.path.expanduser("~/.config"),
+        "/tmp",
+        "/var/tmp",
+    ]
+    abs_ws = os.path.abspath(os.path.expanduser(workspace_dir))
+    if not any(abs_ws.startswith(allowed) for allowed in ALLOWED_WORKDIRS):
+        raise PermissionError(
+            f"[安全攔截] 拒絕在工作目錄外啟動服務：{workspace_dir}。"
+            f"僅允許：{', '.join(ALLOWED_WORKDIRS)}"
+        )
+    
     if not os.path.exists(workspace_dir):
         raise FileNotFoundError(f"[Errno 2] 工作目錄不存在: {workspace_dir}")
     
@@ -803,6 +1012,20 @@ def patch_file_content(file_path: str, search_pattern: str, replacement_text: st
     外科手術檔案修改器。精準替換，不覆寫無關部分。
     所有錯誤以標準 Exception 拋出，供 Guard 攔截學習。
     """
+    # 🛡️ H-4 fix: 路徑白名單 — 僅允許修改特定目錄下的檔案
+    ALLOWED_PATHS = [
+        os.path.expanduser("~/.hermes"),
+        os.path.expanduser("~/.config"),
+        "/tmp",
+        "/var/tmp",
+    ]
+    abs_path = os.path.abspath(os.path.expanduser(file_path))
+    if not any(abs_path.startswith(allowed) for allowed in ALLOWED_PATHS):
+        raise PermissionError(
+            f"[安全攔截] 拒絕修改路徑外的檔案：{file_path}。"
+            f"僅允許：{', '.join(ALLOWED_PATHS)}"
+        )
+    
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"[Errno 2] 檔案不存在: {file_path}")
     

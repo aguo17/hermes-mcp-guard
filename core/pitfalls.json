@@ -1,6 +1,6 @@
 {
-  "version": "1.0",
-  "description": "Hermes MCP Guard — 核心防禦抗體 (開源版)",
+  "version": "2.0",
+  "description": "Hermes MCP Guard — 核心防禦抗體 (開源版). guard_check 已棄用，改用 probe_type + probe_target。",
   "pitfalls": [
     {
       "id": "PF-MANUAL-API-JSON",
@@ -12,7 +12,6 @@
         "json.loads.*failed"
       ],
       "description": "嚴禁裸奔的 json.loads(response.text) — 必須先利用 re.sub 剝離 Markdown 標籤以防範毀滅性的 JSONDecodeError。",
-      "guard_check": "if echo \"$CMD\" | grep -q 'python ' && TARGET=$(echo \"$CMD\" | awk '{print $NF}') && [ -f \"$TARGET\" ] && grep -q 'json\\.loads(' \"$TARGET\" && ! grep -qE 're\\.sub|\\.strip\\(' \"$TARGET\"; then echo 'SECURITY_HALT: 偵測到未受保護的 json.loads()。請在解析前加入 re.sub 剝離 Markdown 標籤。'; exit 1; fi",
       "remediation": [
         "使用 re.sub(r'^```(?:json)?\\s*\\n?|\\n?```$', '', text, flags=re.DOTALL).strip('`json \\n') 進行 Sanitization 處理。"
       ],
