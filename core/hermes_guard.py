@@ -46,6 +46,7 @@ CATEGORY_MAP = {
     "api": ["api", "litellm"],
     "litellm": ["litellm", "api", "system"],
     "git": ["system"],
+    "shell": ["system", "api", "litellm", "docker"],  # 🛡️ M-1 fix: MCP 永遠傳 op_type="shell"
     "all": None
 }
 

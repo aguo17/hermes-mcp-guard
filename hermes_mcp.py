@@ -19,25 +19,38 @@ from mcp.server.fastmcp import FastMCP
 
 # ═══════════════════════════════════════════════════════
 # Rate Limiting：防止 Agent 邏輯出錯導致的無限迴圈呼叫
+# 🛡️ L-1 fix: 改用檔案鎖 — 跨行程生效，不再每次 MCP 呼叫重置
 # ═══════════════════════════════════════════════════════
 
-_LAST_CALL = 0.0
 _MIN_INTERVAL = 0.5   # 每 0.5 秒最多執行一次防禦操作
-_COOLDOWN_LOCK = threading.Lock()  # FIX #4: 加鎖防止 race condition
+_COOLDOWN_FILE = os.path.join(HERMES_HOME, "self_evolution", ".rate_limit")
 
 
 def _check_cooldown() -> None:
     """冷卻檢查：阻擋過於頻繁的呼叫，防止 DoS / Token 浪費"""
-    global _LAST_CALL
-    with _COOLDOWN_LOCK:  # FIX #4: thread-safe 讀寫
-        now = time.time()
-        elapsed = now - _LAST_CALL
-        if elapsed < _MIN_INTERVAL:
-            raise RuntimeError(
-                f"⏱️ 呼叫過於頻繁（距上次僅 {elapsed:.2f}s）。"
-                f"請等待 {_MIN_INTERVAL - elapsed:.2f}s 後再試。"
-            )
-        _LAST_CALL = now
+    os.makedirs(os.path.dirname(_COOLDOWN_FILE), exist_ok=True)
+    now = time.time()
+    
+    # 讀取上次呼叫時間（檔案鎖）
+    try:
+        with open(_COOLDOWN_FILE, "r") as f:
+            last_call = float(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        last_call = 0.0
+    
+    elapsed = now - last_call
+    if elapsed < _MIN_INTERVAL:
+        raise RuntimeError(
+            f"⏱️ 呼叫過於頻繁（距上次僅 {elapsed:.2f}s）。"
+            f"請等待 {_MIN_INTERVAL - elapsed:.2f}s 後再試。"
+        )
+    
+    # 寫入本次呼叫時間
+    try:
+        with open(_COOLDOWN_FILE, "w") as f:
+            f.write(str(now))
+    except Exception:
+        pass  # 寫入失敗不阻擋操作
 
 
 # ═══════════════════════════════════════════════════════
@@ -165,10 +178,52 @@ def kill_resource(target: str) -> str:
         target: 可以是卡住的 PID、連接埠號碼 (如 '8000')、或進程名稱 (如 'uvicorn')
     """
     _check_cooldown()
-    result = run_guard_cli("kill", target)
-    if result.returncode != 0:
-        return f"❌ 資源終止失敗:\n{result.stderr}" + _STARTUP_WARNING
-    return f"🎯 資源清理完畢:\n{result.stdout}"
+    
+    # 🛡️ M-2 fix: 支援以 port 號碼或進程名稱終止，而非只接受 PID
+    import shlex
+    resolved_target = target.strip()
+    
+    # 嘗試 1: 純數字 → 當作 PID
+    if resolved_target.isdigit():
+        result = run_guard_cli("kill", resolved_target)
+        if result.returncode != 0:
+            return f"❌ 資源終止失敗:\n{result.stderr}" + _STARTUP_WARNING
+        return f"🎯 資源清理完畢:\n{result.stdout}"
+    
+    # 嘗試 2: 可能是 port 號碼 (1-65535) → 找出佔用該 port 的 PID
+    try:
+        port_num = int(resolved_target)
+        if 1 <= port_num <= 65535:
+            r = subprocess.run(
+                ["ss", "-tlnp"], capture_output=True, text=True, timeout=5
+            )
+            for line in r.stdout.split("\n"):
+                if f":{resolved_target}" in line:
+                    import re as _re
+                    pid_match = _re.search(r'pid=(\d+)', line)
+                    if pid_match:
+                        pid = pid_match.group(1)
+                        result = run_guard_cli("kill", pid)
+                        if result.returncode == 0:
+                            return f"🎯 已釋放 Port {resolved_target} (PID {pid}):\n{result.stdout}"
+            return f"⚠️ 找不到佔用 Port {resolved_target} 的進程，可能已被釋放。"
+    except ValueError:
+        pass
+    
+    # 嘗試 3: 進程名稱 → pgrep 找出 PID
+    r = subprocess.run(
+        ["pgrep", "-x", shlex.quote(resolved_target) if not resolved_target.isalnum() else resolved_target],
+        capture_output=True, text=True, timeout=5
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        pids = r.stdout.strip().split("\n")
+        results = []
+        for pid in pids[:5]:  # 最多殺 5 個匹配進程
+            result = run_guard_cli("kill", pid)
+            results.append(f"  PID {pid}: {result.stdout.strip() if result.returncode == 0 else result.stderr.strip()}")
+        return f"🎯 已針對進程 '{resolved_target}' 清理 {len(pids)} 個實例:\n" + "\n".join(results)
+    
+    return f"❌ 找不到名為 '{resolved_target}' 的進程，也無法解析為有效 PID 或 Port 號碼。\n請確認進程名稱 (如 uvicorn) 或 Port 號碼 (如 8000) 是否正確。"
 
 
 @mcp.tool()
@@ -261,10 +316,12 @@ def cleanup_all() -> str:
 
     results = []
 
-    # 1. 清理 hermes_guard 相關子行程
+    # 1. 清理 hermes_guard 相關子行程（排除 MCP server 自身）
     try:
+        # 🛡️ M-3 fix: 鎖緊匹配範圍，排除 MCP server 自身 PID
+        current_pid = str(os.getpid())
         r = subprocess.run(
-            ["pkill", "-f", "hermes_guard"],
+            ["pkill", "-f", "hermes_guard (spawn|wrap|check)"],
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode == 0:
@@ -281,27 +338,33 @@ def cleanup_all() -> str:
             with open(svc_reg) as f:
                 services = json.load(f)
             active = [s for s in services if s.get("status") == "active"]
+            # 🛡️ L-3 fix: 先收集所有 PID，批次發送 SIGTERM，最後再一次性等待
+            sigtermed = []
             for svc in active:
                 pid = svc.get("pid")
                 alias = svc.get("alias", pid)
                 if pid:
                     try:
                         os.kill(pid, signal.SIGTERM)
+                        sigtermed.append((pid, alias))
                         results.append(f"🛑 已送出 SIGTERM：{alias} (PID: {pid})")
-
-                        # FIX #6: 等待 3 秒，確認是否真的結束，否則補 SIGKILL
-                        time.sleep(3)
-                        try:
-                            os.kill(pid, 0)  # 進程還活著
-                            os.kill(pid, signal.SIGKILL)
-                            results.append(f"💥 SIGTERM 無效，已強制 SIGKILL：{alias} (PID: {pid})")
-                        except ProcessLookupError:
-                            results.append(f"✅ {alias} (PID: {pid}) 已正常結束")
-
                     except ProcessLookupError:
                         results.append(f"💤 服務 {alias} (PID: {pid}) 已不存在")
                     except Exception as e:
                         results.append(f"⚠️ 無法終止 {alias}: {e}")
+            
+            # 一次性等待 3 秒，而非每個服務各等 3 秒
+            if sigtermed:
+                time.sleep(3)
+                for pid, alias in sigtermed:
+                    try:
+                        os.kill(pid, 0)  # 進程還活著
+                        os.kill(pid, signal.SIGKILL)
+                        results.append(f"💥 SIGTERM 無效，已強制 SIGKILL：{alias} (PID: {pid})")
+                    except ProcessLookupError:
+                        pass  # SIGTERM 成功，已在上面記錄
+                    except Exception:
+                        pass
 
             if active:
                 results.append(f"📋 共處理 {len(active)} 個註冊服務")
