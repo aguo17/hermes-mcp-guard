@@ -57,6 +57,35 @@ Add the following to your MCP configuration file:
 | `get_active_defense_rules` | Transparency panel — view all currently active antibodies for full user control. |
 | `cleanup_all` | Environment cleanup — releases zombie processes, orphaned ports, and stale child processes. |
 
+## 🐧 OS Kernel Watchdogs (Phase 1+2)
+
+Beyond application-layer defense, Hermes includes **7 battle-tested watchdogs** that monitor the OS kernel and sensory layers — the "silent killers" that `df -h` and traditional monitoring miss:
+
+```
+core/watchdogs/
+├── os_kernel_health.sh      # Phase 1: Kernel internals (inode, FS-ro, Zombie, FD, oops, entropy)
+├── os_network_health.sh     # Phase 2: Gray failure detection (NIC/DNS/Journald via pure sysfs+glibc)
+└── reflect_daily.sh         # Knowledge graph nightly reflection worker
+```
+
+| Layer | Watchdog | What It Catches | Probe Method |
+|-------|----------|----------------|-------------|
+| **Kernel** | `os_kernel_health.sh` | inode exhaustion, forced read-only FS, zombie overflow, kernel oops | `/proc`, `sysfs`, `dmesg` |
+| **Sensory** | `os_network_health.sh` | NIC link down, DNS resolution failure, journald bloat | `/sys/class/net`, `getent`, `du -sm` |
+| **Cognition** | `reflect_daily.sh` | Pattern extraction from evolution logs → knowledge graph | Regex-based, zero-token |
+
+**Design philosophy**: *Silent unless alert*. All 7 watchdogs produce zero output on healthy systems, eliminating alert fatigue.
+
+### 🧪 Chaos Engineering Validated
+
+All Phase 2 watchdogs have passed three zero-risk chaos experiments:
+
+| Test | Injection Method | Result |
+|------|-----------------|--------|
+| Phantom NIC | `ip link add eth-chaos type dummy` → set down | ✅ Detected as Link Down |
+| Journal Bloat | `fallocate -l 2100M` (0.001s, zero write wear) | ✅ Detected >2GB |
+| DNS Isolation | `unshare -n` (isolated network namespace) | ✅ 2s timeout, host unaffected |
+
 ---
 
 ## 🔒 Security Policy
