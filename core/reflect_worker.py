@@ -13,10 +13,14 @@ from datetime import datetime
 from collections import defaultdict
 
 # ─── 路徑設定 ───
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(BASE_DIR, "evolution.log")
-GRAPH_FILE = os.path.join(BASE_DIR, "knowledge_graph.json")
-PITFALLS_FILE = os.path.join(BASE_DIR, "pitfalls.json")
+# 🦅 Split-Brain fix: 對齊 hermes_guard.py 的寫入路徑（~/.hermes/self_evolution/）
+# 不再讀取 repo 內的 core/ 目錄，否則每天 03:00 永遠找不到日誌
+HERMES_HOME = os.environ.get("HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes"))
+EVO_DIR = os.path.join(HERMES_HOME, "self_evolution")
+
+LOG_FILE = os.path.join(EVO_DIR, "evolution.log")
+GRAPH_FILE = os.path.join(EVO_DIR, "knowledge_graph.json")
+PITFALLS_FILE = os.path.join(EVO_DIR, "pitfalls.json")
 THRESHOLD = 3  # 同一關聯出現 N 次 → 觸發進化
 
 

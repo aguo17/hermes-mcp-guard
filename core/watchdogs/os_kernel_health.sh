@@ -231,6 +231,6 @@ if [ "$ALERT" -eq 1 ]; then
     echo "  oops: ${OOPS_COUNT}"
     echo "  entropy: ${ENTROPY:-N/A}"
     echo "  dns: $(systemctl is-active systemd-resolved 2>/dev/null || echo N/A)"
-    echo "  nic: $(cat /sys/class/net/eno1/operstate 2>/dev/null || echo N/A)"
+    echo "  nic: $(cat /sys/class/net/e*/operstate 2>/dev/null | head -1 || echo N/A)"
     echo "  journald: ${JOURNAL_SIZE_MB:-N/A}MB"
 fi
