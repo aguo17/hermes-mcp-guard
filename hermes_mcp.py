@@ -194,6 +194,26 @@ def kill_resource(target: str) -> str:
     """
     _check_cooldown()
     
+    # 🛡️ P-1: 防自殺保護名單 — 絕對不能終止的系統關鍵進程
+    CRITICAL_PROCS = [
+        "hermes-gateway", "hermes_cli",        # Hermes 主程序 (Telegram 連線)
+        "tailscaled", "tailscale",              # VPN 通道
+        "ngrok",                                 # SSH 備援通道
+        "sshd",                                  # SSH daemon
+        "systemd", "systemd-logind",             # init system
+        "hermes_mcp.py",                         # Guard 自身
+    ]
+    resolved_target = target.strip()
+    
+    # 檢查目標是否為保護名單內的進程
+    for protected in CRITICAL_PROCS:
+        if resolved_target == protected or resolved_target.startswith(protected):
+            return (
+                f"🛡️ [防自殺保護] 拒絕終止系統關鍵進程 '{resolved_target}'。\n"
+                f"此進程 ({protected}) 屬於系統命脈保護名單，終止將導致 Telegram/網路斷線。\n"
+                f"若確定需要操作，請手動以其他方式處理。"
+            )
+    
     # 🛡️ M-2 fix: 支援以 port 號碼或進程名稱終止，而非只接受 PID
     import shlex
     resolved_target = target.strip()

@@ -16,7 +16,7 @@ for word in "${KEYWORDS[@]}"; do
 done
 
 # 2. 檢查絕對路徑硬編碼
-if grep -rn "/home/$(whoami)" . --exclude-dir=.git --exclude=release_check.sh 2>/dev/null; then
+if grep -rn "/home/$(whoami)" . --exclude-dir=.git --exclude-dir=__pycache__ --exclude=release_check.sh 2>/dev/null; then
     echo "❌ 警告：偵測到本地硬編碼路徑，請改用相對路徑或環境變數！"
     PASS=false
 fi

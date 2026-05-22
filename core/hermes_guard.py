@@ -16,7 +16,7 @@ Hermes Guard — Unified Self-Evolution Engine
 
 這是 Agent 在執行任何 systemd/docker/pip/port/litellm 操作前「必須」呼叫的工具。
 """
-import json, os, re, subprocess, sys, time, platform
+import json, os, re, subprocess, sys, time, platform, threading, ctypes
 from pathlib import Path
 from datetime import datetime
 
@@ -508,7 +508,6 @@ def _validate_regex_safety(pattern: str, error_segment: str) -> tuple:
         return False, f"拒絕註冊：regex 長度 {len(pattern)} 超過上限 200 字元"
 
     # 檢查 3: 自我測試 — 用 50 字元的 'a' 測試是否逾時
-    import threading, ctypes
     def _test_re():
         try:
             re.search(pattern, "a" * 50 + "X")
