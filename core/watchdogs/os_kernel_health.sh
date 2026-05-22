@@ -1,21 +1,16 @@
 #!/bin/bash
-# ═══════════════════════════════════════════════════════════════
-#  OS Kernel Layer Health Watchdog
-#  Phase 1: inode / FS ro / Zombie / FD / kernel oops / entropy
-#  Phase 2: DNS 解析 / NIC 網卡 / Journald 日誌
-#
-#  設計原則：零外部依賴，純 /proc + sysfs + dmesg + /sys/class/net
-#  Watchdog 模式：正常 → 靜默，異常 → 輸出警報
-#
-#  ⚠️ 本 Watchdog 依賴 Linux 核心機制 (/proc, sysfs, dmesg, journald)
-#  macOS/BSD 使用者：腳本會自動偵測並安全退出，不會報錯
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================================
+# Hermes Phase 1 Watchdog: os_kernel_health.sh
+# 防禦目標：核心崩潰、資源耗盡 (inode, Zombie, FS-ro, FD, oops, entropy)
+# ==============================================================================
 
-# 🦅 跨系統防禦：非 Linux 系統安全退出
+# ------------------------------------------------------------------------------
+# [跨平台相容性防護] Graceful Degradation
+# ------------------------------------------------------------------------------
 if [ "$(uname -s)" != "Linux" ]; then
-    echo "⚠️  此 Watchdog 依賴 Linux 核心機制 (/proc, sysfs, journald)。"
-    echo "   您的系統為 $(uname -s)，將略過核心層檢測。"
-    echo "   macOS 使用者請改用 os_network_health.sh（已適配跨平台）。"
+    # 非 Linux 系統 (如 macOS) 缺乏 /proc 系統與特定的 Kernel 機制。
+    # 為了貫徹「Silent unless alert」原則，這裡直接以健康代碼 (0) 靜默退出，
+    # 讓 macOS 用戶自動降級為僅依賴 Userland 的 Linter 防禦。
     exit 0
 fi
 
