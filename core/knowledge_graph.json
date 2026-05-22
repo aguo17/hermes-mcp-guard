@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "description": "Hermes MCP Guard — 知識圖譜範例",
+  "nodes": ["uvicorn_gateway", "port_8000", "llama.cpp", "RAM_12GB", "pip_install", "PEP_668"],
+  "edges": {
+    "uvicorn_gateway-[OCCUPIES]->port_8000": {
+      "source": "uvicorn_gateway",
+      "target": "port_8000",
+      "relation": "OCCUPIES",
+      "weight": 7,
+      "context": "Address already in use",
+      "mitigated": false
+    },
+    "llama.cpp-[EXCEEDS]->RAM_12GB": {
+      "source": "llama.cpp",
+      "target": "RAM_12GB",
+      "relation": "EXCEEDS",
+      "weight": 4,
+      "context": "OOM Killed during model quantization",
+      "mitigated": false
+    },
+    "pip_install-[TRIGGERS]->PEP_668": {
+      "source": "pip_install",
+      "target": "PEP_668",
+      "relation": "TRIGGERS",
+      "weight": 12,
+      "context": "externally-managed-environment",
+      "mitigated": true
+    }
+  },
+  "clusters": [],
+  "stats": { "total_edges": 3, "total_nodes": 6, "extraction_count": 0 }
+}

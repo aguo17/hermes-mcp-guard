@@ -1,0 +1,55 @@
+{
+  "version": "1.0",
+  "description": "Hermes MCP Guard — 核心防禦抗體 (開源版)",
+  "pitfalls": [
+    {
+      "id": "PF-MANUAL-API-JSON",
+      "category": "api",
+      "severity": "critical",
+      "error_patterns": [
+        "Expecting value: line 1 column 1",
+        "JSONDecodeError",
+        "json.loads.*failed"
+      ],
+      "description": "嚴禁裸奔的 json.loads(response.text) — 必須先利用 re.sub 剝離 Markdown 標籤以防範毀滅性的 JSONDecodeError。",
+      "guard_check": "if echo \"$CMD\" | grep -q 'python ' && TARGET=$(echo \"$CMD\" | awk '{print $NF}') && [ -f \"$TARGET\" ] && grep -q 'json\\.loads(' \"$TARGET\" && ! grep -qE 're\\.sub|\\.strip\\(' \"$TARGET\"; then echo 'SECURITY_HALT: 偵測到未受保護的 json.loads()。請在解析前加入 re.sub 剝離 Markdown 標籤。'; exit 1; fi",
+      "remediation": [
+        "使用 re.sub(r'^```(?:json)?\\s*\\n?|\\n?```$', '', text, flags=re.DOTALL).strip('`json \\n') 進行 Sanitization 處理。"
+      ],
+      "source": "manual"
+    },
+    {
+      "id": "PF-AUTO-PEP668",
+      "category": "pip",
+      "severity": "high",
+      "error_patterns": [
+        "externally-managed-environment",
+        "error: externally-managed-environment",
+        "PEP 668"
+      ],
+      "description": "Ubuntu 系統環境保護觸發 (PEP 668)，阻擋了全域 pip 安裝。",
+      "remediation": [
+        "首選: python3 -m venv venv && source venv/bin/activate && pip install <package>",
+        "次選: python3 -m pip install <package>",
+        "最後手段: pip install --break-system-packages <package>"
+      ],
+      "source": "auto"
+    },
+    {
+      "id": "PF-AUTO-PORT-98",
+      "category": "system",
+      "severity": "medium",
+      "error_patterns": [
+        "Address already in use",
+        "OSError: [Errno 98]",
+        "port.*already"
+      ],
+      "description": "網路服務啟動失敗，目標通訊埠已被其他常駐進程佔用。",
+      "remediation": [
+        "請先用 kill_resource 工具傳入該 Port 號碼進行強制資源清理",
+        "或在啟動參數中將 Port 號碼加 1 避開衝突"
+      ],
+      "source": "auto"
+    }
+  ]
+}

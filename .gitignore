@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.log
+*.jsonl
+.env
+active_services.json
+evolution.log
+staging_pitfalls.json
+data_store/
+.DS_Store
