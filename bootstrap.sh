@@ -14,6 +14,16 @@ LOG_DIR="$SCRIPT_DIR/logs"
 IS_LINUX=false
 [ "$(uname -s)" = "Linux" ] && IS_LINUX=true
 
+# FIX M-4: 預設不自動修改系統 crontab，需明確同意。
+# 用法：
+#   bash bootstrap.sh            → 只裝依賴、建目錄，cron 僅顯示「將要安裝的內容」並詢問
+#   bash bootstrap.sh --yes      → 非互動模式，確認安裝 cron
+#   HERMES_NO_CRON=1 bash ...     → 強制略過 cron 安裝
+ASSUME_YES=false
+for arg in "$@"; do
+    [ "$arg" = "--yes" ] || [ "$arg" = "-y" ] && ASSUME_YES=true
+done
+
 echo "╔══════════════════════════════════════════╗"
 echo "║  🛡️  Hermes MCP Guard — 啟動安裝         ║"
 echo "╚══════════════════════════════════════════╝"
@@ -24,16 +34,22 @@ echo ""
 
 # ─── Step 1: 依賴安裝 ─────────────────────────────────────
 echo "📦 Step 1/4: 安裝 Python 依賴..."
+# FIX M-4: 優先使用 venv，避免污染系統 Python（--break-system-packages 僅作最後手段）
 if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
-    pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
-    pip3 install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
-    python3 -m pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
-    pip install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
-    pip3 install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
-    python3 -m pip install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || {
-        echo "   ⚠️  自動 pip 安裝失敗，請手動執行："
-        echo "   pip install --break-system-packages -r $SCRIPT_DIR/requirements.txt"
-    }
+    if [ -d "$SCRIPT_DIR/venv" ] || python3 -m venv "$SCRIPT_DIR/venv" 2>/dev/null; then
+        echo "   ✅ 使用虛擬環境 $SCRIPT_DIR/venv"
+        # shellcheck disable=SC1091
+        source "$SCRIPT_DIR/venv/bin/activate"
+        pip install -r "$SCRIPT_DIR/requirements.txt" --quiet || \
+            echo "   ⚠️  venv 安裝失敗，請手動處理。"
+    else
+        echo "   ⚠️  無法建立 venv，改用使用者層級安裝（--user）"
+        python3 -m pip install --user -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || \
+        python3 -m pip install --user --break-system-packages -r "$SCRIPT_DIR/requirements.txt" --quiet 2>/dev/null || {
+            echo "   ⚠️  自動安裝失敗，請手動執行（建議用 venv）："
+            echo "   python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+        }
+    fi
 else
     echo "   ⚠️  找不到 requirements.txt，跳過。"
 fi
@@ -49,54 +65,70 @@ echo ""
 # ─── Step 3: Cron 排程注入 ─────────────────────────────────
 echo "⏰ Step 3/4: 設定 Watchdog 排程..."
 
-CRON_TMP=$(mktemp)
-crontab -l 2>/dev/null > "$CRON_TMP" || true
+# FIX M-4: 修改使用者 crontab 前先取得明確同意
+if [ "${HERMES_NO_CRON:-0}" = "1" ]; then
+    echo "   ⏭️  HERMES_NO_CRON=1，略過所有 cron 排程安裝。"
+    echo ""
+    CRON_ADDED=0
+else
+    echo "   ℹ️  即將在你的 crontab 安裝以下排程（每 30 分鐘 / 每日 03:00）："
+    echo "       - os_network_health.sh   每 30 分鐘"
+    $IS_LINUX && echo "       - os_kernel_health.sh    每 30 分鐘"
+    echo "       - reflect_daily.sh       每日 03:00"
+    echo ""
 
-CRON_ADDED=0
-
-add_cron_job() {
-    local schedule="$1"
-    local script_path="$2"
-    local description="$3"
-
-    # 避免重複寫入（冪等性）
-    if grep -qF "$script_path" "$CRON_TMP" 2>/dev/null; then
-        echo "   ⏭️  已存在：$description"
-        return
+    PROCEED_CRON=false
+    if $ASSUME_YES; then
+        PROCEED_CRON=true
+        echo "   ✅ --yes 已指定，繼續安裝 cron。"
+    else
+        printf "   ❓ 是否在 crontab 安裝上述排程？[y/N] "
+        read -r _ans </dev/tty 2>/dev/null || _ans="n"
+        case "$_ans" in
+            y|Y|yes|YES) PROCEED_CRON=true ;;
+            *) echo "   ⏭️  使用者未同意，略過 cron 安裝。可日後手動執行：bash bootstrap.sh --yes" ;;
+        esac
     fi
 
-    echo "$schedule bash $script_path >> $LOG_DIR/cron_$(basename "$script_path" .sh).log 2>&1" >> "$CRON_TMP"
-    echo "   ✅ 已新增：$description"
-    CRON_ADDED=$((CRON_ADDED + 1))
-}
+    CRON_ADDED=0
+    if $PROCEED_CRON; then
+        CRON_TMP=$(mktemp)
+        crontab -l 2>/dev/null > "$CRON_TMP" || true
 
-# Phase 2 感官層 Watchdog（跨平台：DNS 檢測 macOS 也支援）
-# NIC 和 Journald 區塊在腳本內已有 OS 判斷，非 Linux 會自動略過
-add_cron_job "*/30 * * * *" "$WATCHDOG_DIR/os_network_health.sh" \
-    "Phase 2 灰度失效預警 (NIC/DNS/Journald) — 每 30 分鐘"
+        add_cron_job() {
+            local schedule="$1"
+            local script_path="$2"
+            local description="$3"
+            if grep -qF "$script_path" "$CRON_TMP" 2>/dev/null; then
+                echo "   ⏭️  已存在：$description"
+                return
+            fi
+            echo "$schedule bash $script_path >> $LOG_DIR/cron_$(basename "$script_path" .sh).log 2>&1" >> "$CRON_TMP"
+            echo "   ✅ 已新增：$description"
+            CRON_ADDED=$((CRON_ADDED + 1))
+        }
 
-# Phase 1 核心層 Watchdog（僅 Linux）
-if $IS_LINUX; then
-    add_cron_job "*/30 * * * *" "$WATCHDOG_DIR/os_kernel_health.sh" \
-        "Phase 1 核心層檢測 (inode/FS/Zombie/FD/oops) — 每 30 分鐘"
-else
-    echo "   ⏭️  略過 os_kernel_health.sh（macOS 不支援 Linux 核心層檢測）"
+        add_cron_job "*/30 * * * *" "$WATCHDOG_DIR/os_network_health.sh" \
+            "Phase 2 灰度失效預警 (NIC/DNS/Journald) — 每 30 分鐘"
+        if $IS_LINUX; then
+            add_cron_job "*/30 * * * *" "$WATCHDOG_DIR/os_kernel_health.sh" \
+                "Phase 1 核心層檢測 (inode/FS/Zombie/FD/oops) — 每 30 分鐘"
+        else
+            echo "   ⏭️  略過 os_kernel_health.sh（macOS 不支援 Linux 核心層檢測）"
+        fi
+        add_cron_job "0 3 * * *" "$WATCHDOG_DIR/reflect_daily.sh" \
+            "知識圖譜夜間反思 — 每日 03:00"
+
+        echo ""
+        if [ "$CRON_ADDED" -gt 0 ]; then
+            crontab "$CRON_TMP"
+            echo "   🎉 已寫入 $CRON_ADDED 個 Cron Job！"
+        else
+            echo "   ℹ️  所有排程已存在，無需新增。"
+        fi
+        rm -f "$CRON_TMP"
+    fi
 fi
-
-# 知識圖譜反思 Worker（每日 03:00）
-add_cron_job "0 3 * * *" "$WATCHDOG_DIR/reflect_daily.sh" \
-    "知識圖譜夜間反思 — 每日 03:00"
-
-echo ""
-
-if [ "$CRON_ADDED" -gt 0 ]; then
-    crontab "$CRON_TMP"
-    echo "   🎉 已寫入 $CRON_ADDED 個 Cron Job！"
-else
-    echo "   ℹ️  所有排程已存在，無需新增。"
-fi
-
-rm -f "$CRON_TMP"
 echo ""
 
 # ─── Step 4: 驗證摘要 ─────────────────────────────────────

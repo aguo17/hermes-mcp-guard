@@ -1027,6 +1027,19 @@ def patch_file_content(file_path: str, search_pattern: str, replacement_text: st
             f"僅允許：{', '.join(ALLOWED_PATHS)}"
         )
     
+    # 🛡️ H-4 第二層：敏感檔案黑名單 — 即使落在白名單路徑內也拒絕
+    SENSITIVE_PATTERNS = [
+        ".ssh/", "authorized_keys", ".bashrc", ".bash_profile",
+        "id_rsa", "id_ed25519", "id_ecdsa", "crontab",
+        "/etc/", "sudoers", "shadow", "passwd",
+    ]
+    filename = os.path.basename(abs_path)
+    if any(p in abs_path for p in SENSITIVE_PATTERNS):
+        raise PermissionError(
+            f"[安全攔截] 拒絕修改敏感檔案：{file_path}。"
+            f"此檔案屬於系統安全關鍵資源，即使位於允許路徑內也不得修改。"
+        )
+    
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"[Errno 2] 檔案不存在: {file_path}")
     
