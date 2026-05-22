@@ -32,30 +32,40 @@ def _get_cooldown_file() -> str:
 
 
 def _check_cooldown() -> None:
-    """冷卻檢查：阻擋過於頻繁的呼叫，防止 DoS / Token 浪費"""
-    os.makedirs(os.path.dirname(_get_cooldown_file()), exist_ok=True)
+    """冷卻檢查：使用 fcntl.flock() 做真正的跨行程原子鎖，防止 race condition"""
+    import fcntl
+    
+    cooldown_file = _get_cooldown_file()
+    os.makedirs(os.path.dirname(cooldown_file), exist_ok=True)
     now = time.time()
     
-    # 讀取上次呼叫時間（檔案鎖）
     try:
-        with open(_get_cooldown_file(), "r") as f:
-            last_call = float(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        last_call = 0.0
-    
-    elapsed = now - last_call
-    if elapsed < _MIN_INTERVAL:
-        raise RuntimeError(
-            f"⏱️ 呼叫過於頻繁（距上次僅 {elapsed:.2f}s）。"
-            f"請等待 {_MIN_INTERVAL - elapsed:.2f}s 後再試。"
-        )
-    
-    # 寫入本次呼叫時間
-    try:
-        with open(_get_cooldown_file(), "w") as f:
-            f.write(str(now))
+        with open(cooldown_file, "a+") as f:
+            # 🛡️ P0: 真正的 advisory lock（跨行程原子操作）
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read().strip()
+                last_call = float(content) if content else 0.0
+                
+                elapsed = now - last_call
+                if elapsed < _MIN_INTERVAL:
+                    raise RuntimeError(
+                        f"⏱️ 呼叫過於頻繁（距上次僅 {elapsed:.2f}s）。"
+                        f"請等待 {_MIN_INTERVAL - elapsed:.2f}s 後再試。"
+                    )
+                
+                # 原子寫入（仍持有鎖）
+                f.seek(0)
+                f.truncate()
+                f.write(str(now))
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except RuntimeError:
+        raise  # 重新拋出冷卻錯誤
     except Exception:
-        pass  # 寫入失敗不阻擋操作
+        pass  # 鎖機制失敗不應阻擋操作（graceful degradation）
 
 
 # ═══════════════════════════════════════════════════════
@@ -134,7 +144,7 @@ def run_guard_cli(action: str, *args) -> subprocess.CompletedProcess:
             ),
         )
     cmd = ["bash", GUARD_SH, action] + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
 
 # ═══════════════════════════════════════════════════════

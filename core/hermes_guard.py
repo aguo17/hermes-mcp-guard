@@ -97,10 +97,10 @@ def _check_pip_version(target: str) -> bool:
 
 ALLOWED_PROBES = {
     "file_exists":       lambda target: os.path.exists(os.path.expanduser(target)),
-    "process_running":   lambda target: subprocess.run(["pgrep", "-x", target], capture_output=True).returncode == 0,
-    "port_in_use":       lambda target: subprocess.run(["ss", "-tlnp"], capture_output=True, text=True).stdout.find(f":{target} ") != -1,
-    "systemctl_active":  lambda target: subprocess.run(["systemctl", "--user", "is-active", target], capture_output=True).returncode == 0,
-    "python_module":     lambda target: subprocess.run([sys.executable or "python3", "-c", f"import {target}"], capture_output=True).returncode == 0,
+    "process_running":   lambda target: subprocess.run(["pgrep", "-x", target], capture_output=True, timeout=5).returncode == 0,
+    "port_in_use":       lambda target: subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=5).stdout.find(f":{target} ") != -1,
+    "systemctl_active":  lambda target: subprocess.run(["systemctl", "--user", "is-active", target], capture_output=True, timeout=5).returncode == 0,
+    "python_module":     lambda target: subprocess.run([sys.executable or "python3", "-c", f"import {target}"], capture_output=True, timeout=10).returncode == 0,
     "pip_version":       _check_pip_version,
     "env_var_set":       lambda target: os.environ.get(target, "") != "",
     "file_contains":     lambda target: _probe_file_contains(target),
@@ -278,7 +278,7 @@ def auto_fix_registry():
     }
 
 def _fix_pin_litellm():
-    r = subprocess.run("python3.11 -m pip show litellm 2>/dev/null | grep Version", shell=True, capture_output=True, text=True)
+    r = subprocess.run("python3.11 -m pip show litellm 2>/dev/null | grep Version", shell=True, capture_output=True, text=True, timeout=10)
     if "1.50" in r.stdout:
         return [{"status": "already_ok"}]
     subprocess.run("python3.11 -m pip install --user --break-system-packages 'litellm==1.50.0'", shell=True, timeout=60)
@@ -289,7 +289,7 @@ def _fix_openai_key():
     if svc.exists() and "OPENAI_API_KEY=dummy" not in svc.read_text():
         content = svc.read_text().replace("Environment=PYTHONUNBUFFERED=1", "Environment=PYTHONUNBUFFERED=1\nEnvironment=OPENAI_API_KEY=dummy")
         svc.write_text(content)
-        subprocess.run("systemctl --user daemon-reload", shell=True)
+        subprocess.run("systemctl --user daemon-reload", shell=True, timeout=10)
         subprocess.run("systemctl --user restart litellm-proxy", shell=True, timeout=15)
         return [{"status": "fixed"}]
     return [{"status": "already_ok"}]
@@ -310,7 +310,7 @@ def _fix_remove_google():
 
 def _fix_disk_cleanup():
     results = []
-    r = subprocess.run("sudo du -sh /var/lib/docker/containers/*/*.log 2>/dev/null | sort -rh | head -5", shell=True, capture_output=True, text=True)
+    r = subprocess.run("sudo du -sh /var/lib/docker/containers/*/*.log 2>/dev/null | sort -rh | head -5", shell=True, capture_output=True, text=True, timeout=30)
     for line in r.stdout.strip().split("\n"):
         parts = line.split("\t")
         if len(parts) == 2 and ("G" in parts[0] or ("M" in parts[0] and float(parts[0][:-1]) > 500)):
