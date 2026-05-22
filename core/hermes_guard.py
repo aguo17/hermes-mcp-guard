@@ -32,12 +32,10 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-# 開源版：優先使用環境變數 HERMES_HOME，否則自動定位 core/ 目錄
-_engine_dir = Path(__file__).resolve().parent
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", _engine_dir))
-PITFALLS_FILE = HERMES_HOME / "pitfalls.json"
-STAGING_FILE = HERMES_HOME / "staging_pitfalls.json"
-EVOLUTION_LOG = HERMES_HOME / "evolution.log"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+PITFALLS_FILE = HERMES_HOME / "self_evolution" / "pitfalls.json"          # 生產：人工審核過的坑
+STAGING_FILE = HERMES_HOME / "self_evolution" / "staging_pitfalls.json"  # 待審：Agent 提案的新坑
+EVOLUTION_LOG = HERMES_HOME / "self_evolution" / "evolution.log"
 SERVICE_REGISTRY = HERMES_HOME / "self_evolution" / "active_services.json"
 
 CATEGORY_MAP = {
@@ -343,7 +341,12 @@ def register_new_pitfall(error_segment: str, explanation: str, remediation_steps
         return {"status": "rejected", "message": f"❌ 註冊失敗：'{error_segment}' 太過泛化，會導致全域癱瘓。請提供具體錯誤訊息。"}
     
     import uuid
-    safe_pattern = re.escape(error_segment)
+    # 🦅 遮罩邏輯：先保護 .* 萬用字元，再對其餘字串做 re.escape()
+    # 防止 re.escape() 將刻意保留的 regex 萬用字元 .* 錯誤轉義為 \.\*
+    # 案例：Journal file.*corrupted → 應保留 .* 的萬用能力，不應變成 \.\*
+    WILDCARD_PLACEHOLDER = "___HERMES_WILDCARD___"
+    masked = error_segment.replace(".*", WILDCARD_PLACEHOLDER)
+    safe_pattern = re.escape(masked).replace(WILDCARD_PLACEHOLDER, ".*")
     
     # 讀取現有 prod
     prod_data = {"schema_version": "1.0", "pitfalls": []}
@@ -363,31 +366,7 @@ def register_new_pitfall(error_segment: str, explanation: str, remediation_steps
     
     if safe_pattern in existing_patterns:
         return {"status": "skipped", "message": "此錯誤特徵已在防禦網中，無須重複註冊。"}
-
-    # [安全網 3] 檔案大小與規則數量限制 — 防止無限增生
-    MAX_AUTO_RULES = 200
-    MAX_FILE_SIZE_KB = 500
-
-    auto_count = sum(1 for p in prod_data.get("pitfalls", []) if p.get("source") == "auto")
-
-    if auto_count >= MAX_AUTO_RULES:
-        # 自動清理最舊的 20% 自動規則
-        auto_rules = [(i, p) for i, p in enumerate(prod_data["pitfalls"]) if p.get("source") == "auto"]
-        auto_rules.sort(key=lambda x: x[1].get("created_at", ""))
-        prune_count = max(1, len(auto_rules) // 5)
-        for i in sorted([idx for idx, _ in auto_rules[:prune_count]], reverse=True):
-            removed = prod_data["pitfalls"].pop(i)
-            log_event("AUTO_PRUNE", f"id={removed['id']} desc={removed.get('description','')[:60]}")
-        log_event("AUTO_PRUNE_BATCH", f"pruned {prune_count} old auto rules (total reached {auto_count})")
-
-    # 檢查檔案大小
-    try:
-        current_size_kb = PITFALLS_FILE.stat().st_size / 1024
-        if current_size_kb > MAX_FILE_SIZE_KB:
-            log_event("SIZE_WARNING", f"pitfalls.json size={current_size_kb:.0f}KB exceeds {MAX_FILE_SIZE_KB}KB limit")
-    except Exception:
-        pass
-
+    
     # 建立新規則
     new_id = f"PF-AUTO-{uuid.uuid4().hex[:6].upper()}"
     new_entry = {
