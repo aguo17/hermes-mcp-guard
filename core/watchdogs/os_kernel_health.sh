@@ -231,6 +231,16 @@ if [ "$ALERT" -eq 1 ]; then
     echo "  oops: ${OOPS_COUNT}"
     echo "  entropy: ${ENTROPY:-N/A}"
     echo "  dns: $(systemctl is-active systemd-resolved 2>/dev/null || echo N/A)"
-    echo "  nic: $(cat /sys/class/net/e*/operstate 2>/dev/null | head -1 || echo N/A)"
+    
+    # ✅ Bug 1 fix: 避開 Pipeline Trap — head -1 的成功退出碼會吃掉 cat 的失敗
+    NIC_STATE=$(cat /sys/class/net/e*/operstate 2>/dev/null | head -1)
+    echo "  nic: ${NIC_STATE:-N/A}"
+    
     echo "  journald: ${JOURNAL_SIZE_MB:-N/A}MB"
+    
+    # ✅ Bug 2 fix: 警報發生時回傳非零退出碼，供外部監控系統 (Prometheus/Zabbix/CI) 偵測
+    exit 1
 fi
+
+# 健康狀態，絕對無聲
+exit 0
