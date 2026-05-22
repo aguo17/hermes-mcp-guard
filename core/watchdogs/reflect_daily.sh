@@ -13,7 +13,15 @@ LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/reflect_cron_$(date +%Y%m%d).log"
 
-cd "$CORE_DIR" && /usr/bin/python3 reflect_worker.py 2>&1 | tee -a "$LOG_FILE"
+cd "$CORE_DIR"
+
+# 🦅 BUG-H fix: reflect_worker.py 若不存在則靜默跳過，不讓 cron job 每天爆炸
+if [ ! -f "$CORE_DIR/reflect_worker.py" ]; then
+    echo "[$(date)] reflect_worker.py 不存在，跳過" >> "$LOG_FILE"
+    exit 0
+fi
+
+/usr/bin/python3 reflect_worker.py 2>&1 | tee -a "$LOG_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 
 # 寫入摘要行

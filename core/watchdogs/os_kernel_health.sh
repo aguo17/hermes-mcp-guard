@@ -62,6 +62,9 @@ elif [ "$ZOMBIE_COUNT" -gt 20 ] 2>/dev/null; then
     ALERT=1
     ALERT_LEVEL="medium"
     REPORT+="🟡 Zombie 程序累積：${ZOMBIE_COUNT} 個（>20）\n"
+    ZOMBIE_LIST=$(ps aux 2>/dev/null | awk '{if($8=="Z") printf "  PID=%s PPID=%s CMD=%s\n", $2, $3, $11}' | head -10)
+    REPORT+="$ZOMBIE_LIST\n"
+    REPORT+="   建議：檢查 PPID 對應的父程序是否未正確 wait()\n"
 fi
 
 # ─── 4. File Descriptor 壓力 ─────────────────────────────────

@@ -11,6 +11,13 @@ import re
 import os
 
 GRAPH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge_graph.json")
+
+# 🦅 優先讀取 HERMES_HOME 下的已安裝 KG（setup.sh 會複製到那），
+# 確保夜間反思寫入的新知識不會因 kg_lookup 讀 repo 原始檔而被忽略
+_HERMES_HOME = os.environ.get("HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes"))
+_INSTALLED_KG = os.path.join(_HERMES_HOME, "self_evolution", "knowledge_graph.json")
+if os.path.exists(_INSTALLED_KG):
+    GRAPH_FILE = _INSTALLED_KG
 RISKY_RELATIONS = {"OCCUPIES", "OOM_KILLED", "EXCEEDS", "CRASHED_BY", "BREAKS", "PRODUCES"}
 WARN_WEIGHT = 3  # 權重 ≥ N 才警告
 

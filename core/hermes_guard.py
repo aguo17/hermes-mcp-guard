@@ -133,9 +133,9 @@ def interceptor_catch(error_text):
             try:
                 if re.search(pattern, error_text, re.IGNORECASE):
                     matches.append({
-                        "id": pf["id"],
-                        "description": pf["description"],
-                        "severity": pf["severity"],
+                        "id": pf.get("id", "unknown"),
+                        "description": pf.get("description", ""),
+                        "severity": pf.get("severity", "medium"),
                         "source": pf.get("source", "manual"),
                         "matched_pattern": pattern,
                         "auto_fix": pf.get("auto_fix"),
@@ -154,7 +154,7 @@ def interceptor_catch(error_text):
     }
     
     if matches:
-        best = sorted(matches, key=lambda m: {"critical": 0, "high": 1, "medium": 2}.get(m["severity"], 3))[0]
+        best = sorted(matches, key=lambda m: {"critical": 0, "high": 1, "medium": 2}.get(m.get("severity", "medium"), 3))[0]
         result["best_match"] = best
         log_event("INTERCEPTOR_MATCH", f"pattern={best['matched_pattern']} pitfall={best['id']}")
     
@@ -216,7 +216,7 @@ def _fix_disk_cleanup():
 
 def remediate(pitfall_id):
     pitfalls = load_pitfalls()
-    target = next((p for p in pitfalls["pitfalls"] if p["id"] == pitfall_id), None)
+    target = next((p for p in pitfalls.get("pitfalls", []) if p.get("id") == pitfall_id), None)
     if not target:
         return {"success": False, "error": f"Pitfall not found: {pitfall_id}"}
     
@@ -280,7 +280,7 @@ def wrap_command(op_type, command):
     
     # Stage 2: Execute
     try:
-        r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)
         result["executed"] = True
         result["exit_code"] = r.returncode
         result["stdout_tail"] = r.stdout[-500:] if r.stdout else ""
