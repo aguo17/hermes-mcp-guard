@@ -95,11 +95,40 @@ def _check_pip_version(target: str) -> bool:
     except Exception:
         return False
 
+# 🦅 跨平台重構: pgrep/ss/systemctl → psutil + systemctl Linux-only guard
+def _probe_process_running(target: str) -> bool:
+    """psutil.process_iter() 取代 pgrep — 跨平台 (Linux/macOS/Windows)"""
+    try:
+        return any(p.info['name'] == target for p in psutil.process_iter(['name']))
+    except Exception:
+        return False
+
+def _probe_port_in_use(target: str) -> bool:
+    """psutil.net_connections() 取代 ss -tlnp — 跨平台 (Linux/macOS/Windows)"""
+    try:
+        port = int(target)
+        return any(
+            conn.laddr.port == port and conn.status == 'LISTEN'
+            for conn in psutil.net_connections(kind='inet')
+        )
+    except Exception:
+        return False
+
+def _probe_systemctl_active(target: str) -> bool:
+    """systemctl — 僅 Linux systemd 支援，其他平台一律回傳 False"""
+    import platform as _platform
+    if _platform.system() != "Linux":
+        return False
+    try:
+        return subprocess.run(["systemctl", "--user", "is-active", target], capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        return False
+
 ALLOWED_PROBES = {
     "file_exists":       lambda target: os.path.exists(os.path.expanduser(target)),
-    "process_running":   lambda target: subprocess.run(["pgrep", "-x", target], capture_output=True, timeout=5).returncode == 0,
-    "port_in_use":       lambda target: subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=5).stdout.find(f":{target} ") != -1,
-    "systemctl_active":  lambda target: subprocess.run(["systemctl", "--user", "is-active", target], capture_output=True, timeout=5).returncode == 0,
+    "process_running":   _probe_process_running,
+    "port_in_use":       _probe_port_in_use,
+    "systemctl_active":  _probe_systemctl_active,
     "python_module":     lambda target: subprocess.run([sys.executable or "python3", "-c", f"import {target}"], capture_output=True, timeout=10).returncode == 0,
     "pip_version":       _check_pip_version,
     "env_var_set":       lambda target: os.environ.get(target, "") != "",
@@ -660,35 +689,22 @@ def inspect_system_state(category: str = "all") -> str:
             state["load_avg"] = "unavailable"
     
     if category in ["all", "memory"]:
-        # 從 /proc/meminfo 解析 (Linux 原生，無需 psutil)
+        # 🦅 跨平台重構: /proc/meminfo → psutil (Linux/macOS/Windows 通用)
         try:
-            meminfo = {}
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    parts = line.split(":")
-                    if len(parts) == 2:
-                        key = parts[0].strip()
-                        val = int(parts[1].strip().split()[0])
-                        meminfo[key] = val
-            
-            total_kb = meminfo.get("MemTotal", 0)
-            avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0) + meminfo.get("Buffers", 0) + meminfo.get("Cached", 0))
-            used_kb = total_kb - meminfo.get("MemFree", 0) - meminfo.get("Buffers", 0) - meminfo.get("Cached", 0)
-            
+            mem = psutil.virtual_memory()
             state["ram"] = {
-                "total_gb": round(total_kb / 1024**2, 2),
-                "available_gb": round(avail_kb / 1024**2, 2),
-                "used_gb": round(used_kb / 1024**2, 2),
-                "usage_pct": round((1 - avail_kb / total_kb) * 100, 1) if total_kb > 0 else 0
+                "total_gb": round(mem.total / 1024**3, 2),
+                "available_gb": round(mem.available / 1024**3, 2),
+                "used_gb": round(mem.used / 1024**3, 2),
+                "usage_pct": mem.percent
             }
             
-            swap_total = meminfo.get("SwapTotal", 0)
-            swap_free = meminfo.get("SwapFree", 0)
-            if swap_total > 0:
+            swap = psutil.swap_memory()
+            if swap.total > 0:
                 state["swap"] = {
-                    "total_gb": round(swap_total / 1024**2, 2),
-                    "used_gb": round((swap_total - swap_free) / 1024**2, 2),
-                    "usage_pct": round((1 - swap_free / swap_total) * 100, 1)
+                    "total_gb": round(swap.total / 1024**3, 2),
+                    "used_gb": round(swap.used / 1024**3, 2),
+                    "usage_pct": swap.percent
                 }
         except Exception:
             state["ram"] = "unavailable"

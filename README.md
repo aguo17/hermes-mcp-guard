@@ -15,7 +15,8 @@ By leveraging the **Model Context Protocol (MCP)**, Hermes seamlessly integrates
 | Layer | 🐧 Linux | 🍎 macOS | 🪟 Windows |
 |-------|:---:|:---:|:---:|
 | **Defense Core** (deny-list, regex interceptor, ReDoS guard, path whitelist) | ✅ | ✅ | ⚠️ Python-only |
-| **System Probes** (`pgrep`, `ss`, `systemctl`, `/proc/meminfo`, `nvidia-smi`) | ✅ | ❌ | ❌ |
+| **System Probes** (`process_running`, `port_in_use`, `python_module`) | ✅ | ✅ | ✅ |
+| **Memory Inspector** (`inspect_system_state` RAM/Swap) | ✅ | ✅ | ✅ |
 | **Auto-Fix** (`systemctl restart`, `daemon-reload`, `pip pin`) | ✅ | ❌ | ❌ |
 | **Watchdogs** (kernel health, network health, DNS, NIC, journald) | ✅ | ⚠️ Graceful exit | ❌ |
 | **Rate Limiter** (`fcntl.flock`) | ✅ | ✅ | ❌ |
@@ -24,8 +25,8 @@ By leveraging the **Model Context Protocol (MCP)**, Hermes seamlessly integrates
 ### What this means in practice
 
 - **🐧 Linux (Ubuntu/Debian/Fedora/Arch)**: Full functionality. This is the target platform.
-- **🍎 macOS**: The defense layer (dangerous command blocking, error pattern matching) **will work**. However, system probes (`systemctl`, `pgrep`, `ss`) will silently return `False`, and watchdogs will gracefully exit. You get ~40% of the feature set.
-- **🪟 Windows**: **Not supported.** The project relies on bash, `fcntl`, `/proc`, `sysfs`, and Linux-specific system utilities. WSL users should run Hermes inside the Linux VM.
+- **🍎 macOS**: ~90% feature parity. The defense layer, system probes, memory inspector, rate limiter, and knowledge graph all work natively via `psutil`. Only `systemctl`-based auto-fixes and Linux kernel watchdogs are unavailable (gracefully degraded).
+- **🪟 Windows**: Core defense layer (deny-list, regex interceptor) and Python-based probes work. Bash scripts, `fcntl`, kernel watchdogs do not. WSL users should run inside the Linux VM for full functionality.
 
 > **We welcome contributions to improve macOS and Windows compatibility.** See [CONTRIBUTING](#-contributing).
 
